@@ -1,10 +1,12 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step attaches the VirtualBox guest additions as a inserted CD onto
@@ -23,7 +25,7 @@ type StepAttachGuestAdditions struct {
 	GuestAdditionsMode string
 }
 
-func (s *StepAttachGuestAdditions) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepAttachGuestAdditions) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
@@ -56,6 +58,7 @@ func (s *StepAttachGuestAdditions) Run(state multistep.StateBag) multistep.StepA
 
 	// Track the path so that we can unregister it from VirtualBox later
 	s.attachedPath = guestAdditionsPath
+	state.Put("guest_additions_attached", true)
 
 	return multistep.ActionContinue
 }
@@ -66,7 +69,6 @@ func (s *StepAttachGuestAdditions) Cleanup(state multistep.StateBag) {
 	}
 
 	driver := state.Get("driver").(Driver)
-	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
 
 	command := []string{
@@ -77,7 +79,7 @@ func (s *StepAttachGuestAdditions) Cleanup(state multistep.StateBag) {
 		"--medium", "none",
 	}
 
-	if err := driver.VBoxManage(command...); err != nil {
-		ui.Error(fmt.Sprintf("Error unregistering guest additions: %s", err))
-	}
+	// Remove the ISO. Note that this will probably fail since
+	// stepRemoveDevices does this as well. No big deal.
+	driver.VBoxManage(command...)
 }

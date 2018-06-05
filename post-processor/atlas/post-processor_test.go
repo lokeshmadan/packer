@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/packer"
 )
 
 func TestPostProcessorConfigure(t *testing.T) {
@@ -37,6 +37,20 @@ func TestPostProcessorConfigure_buildId(t *testing.T) {
 
 	if p.config.buildId != 5 {
 		t.Fatalf("bad: %#v", p.config.buildId)
+	}
+}
+
+func TestPostProcessorConfigure_compileId(t *testing.T) {
+	defer os.Setenv(CompileEnvKey, os.Getenv(CompileEnvKey))
+	os.Setenv(CompileEnvKey, "5")
+
+	var p PostProcessor
+	if err := p.Configure(validDefaults()); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	if p.config.compileId != 5 {
+		t.Fatalf("bad: %#v", p.config.compileId)
 	}
 }
 

@@ -1,8 +1,10 @@
 package iso
 
 import (
-	"github.com/mitchellh/multistep"
+	"context"
 	"testing"
+
+	"github.com/hashicorp/packer/helper/multistep"
 )
 
 func TestStepRegister_impl(t *testing.T) {
@@ -16,7 +18,7 @@ func TestStepRegister_regularDriver(t *testing.T) {
 	state.Put("vmx_path", "foo")
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -32,11 +34,15 @@ func TestStepRegister_remoteDriver(t *testing.T) {
 	step := new(StepRegister)
 
 	driver := new(RemoteDriverMock)
+	var config Config
+	config.KeepRegistered = false
+	state.Put("config", &config)
+
 	state.Put("driver", driver)
 	state.Put("vmx_path", "foo")
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -61,5 +67,31 @@ func TestStepRegister_remoteDriver(t *testing.T) {
 	}
 	if driver.UnregisterPath != "foo" {
 		t.Fatal("should unregister proper path")
+	}
+}
+func TestStepRegister_WithoutUnregister_remoteDriver(t *testing.T) {
+	state := testState(t)
+	step := new(StepRegister)
+
+	driver := new(RemoteDriverMock)
+	var config Config
+	config.KeepRegistered = true
+	state.Put("config", &config)
+
+	state.Put("driver", driver)
+	state.Put("vmx_path", "foo")
+
+	// Test the run
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("bad action: %#v", action)
+	}
+	if _, ok := state.GetOk("error"); ok {
+		t.Fatal("should NOT have error")
+	}
+
+	// cleanup
+	step.Cleanup(state)
+	if driver.UnregisterCalled {
+		t.Fatal("unregister should not be called")
 	}
 }

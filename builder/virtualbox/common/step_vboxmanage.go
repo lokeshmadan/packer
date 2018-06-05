@@ -1,10 +1,13 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"strings"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type commandTemplate struct {
@@ -22,10 +25,10 @@ type commandTemplate struct {
 // Produces:
 type StepVBoxManage struct {
 	Commands [][]string
-	Tpl      *packer.ConfigTemplate
+	Ctx      interpolate.Context
 }
 
-func (s *StepVBoxManage) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepVBoxManage) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
@@ -34,7 +37,7 @@ func (s *StepVBoxManage) Run(state multistep.StateBag) multistep.StepAction {
 		ui.Say("Executing custom VBoxManage commands...")
 	}
 
-	tplData := &commandTemplate{
+	s.Ctx.Data = &commandTemplate{
 		Name: vmName,
 	}
 
@@ -44,7 +47,7 @@ func (s *StepVBoxManage) Run(state multistep.StateBag) multistep.StepAction {
 
 		for i, arg := range command {
 			var err error
-			command[i], err = s.Tpl.Process(arg, tplData)
+			command[i], err = interpolate.Render(arg, &s.Ctx)
 			if err != nil {
 				err := fmt.Errorf("Error preparing vboxmanage command: %s", err)
 				state.Put("error", err)

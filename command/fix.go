@@ -3,13 +3,15 @@ package command
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
-	"github.com/mitchellh/packer/fix"
+	"github.com/hashicorp/packer/fix"
+	"github.com/hashicorp/packer/template"
+
+	"github.com/posener/complete"
 )
 
 type FixCommand struct {
@@ -17,28 +19,24 @@ type FixCommand struct {
 }
 
 func (c *FixCommand) Run(args []string) int {
-	env, err := c.Meta.Environment()
-	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error initializing environment: %s", err))
+	var flagValidate bool
+	flags := c.Meta.FlagSet("fix", FlagSetNone)
+	flags.BoolVar(&flagValidate, "validate", true, "")
+	flags.Usage = func() { c.Ui.Say(c.Help()) }
+	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 
-	cmdFlags := flag.NewFlagSet("fix", flag.ContinueOnError)
-	cmdFlags.Usage = func() { env.Ui().Say(c.Help()) }
-	if err := cmdFlags.Parse(args); err != nil {
-		return 1
-	}
-
-	args = cmdFlags.Args()
+	args = flags.Args()
 	if len(args) != 1 {
-		cmdFlags.Usage()
+		flags.Usage()
 		return 1
 	}
 
 	// Read the file for decoding
 	tplF, err := os.Open(args[0])
 	if err != nil {
-		env.Ui().Error(fmt.Sprintf("Error opening template: %s", err))
+		c.Ui.Error(fmt.Sprintf("Error opening template: %s", err))
 		return 1
 	}
 	defer tplF.Close()
@@ -47,7 +45,7 @@ func (c *FixCommand) Run(args []string) int {
 	var templateData map[string]interface{}
 	decoder := json.NewDecoder(tplF)
 	if err := decoder.Decode(&templateData); err != nil {
-		env.Ui().Error(fmt.Sprintf("Error parsing template: %s", err))
+		c.Ui.Error(fmt.Sprintf("Error parsing template: %s", err))
 		return 1
 	}
 
@@ -65,7 +63,7 @@ func (c *FixCommand) Run(args []string) int {
 		log.Printf("Running fixer: %s", name)
 		input, err = fixer.Fix(input)
 		if err != nil {
-			env.Ui().Error(fmt.Sprintf("Error fixing: %s", err))
+			c.Ui.Error(fmt.Sprintf("Error fixing: %s", err))
 			return 1
 		}
 	}
@@ -73,20 +71,42 @@ func (c *FixCommand) Run(args []string) int {
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	if err := encoder.Encode(input); err != nil {
-		env.Ui().Error(fmt.Sprintf("Error encoding: %s", err))
+		c.Ui.Error(fmt.Sprintf("Error encoding: %s", err))
 		return 1
 	}
 
 	var indented bytes.Buffer
 	if err := json.Indent(&indented, output.Bytes(), "", "  "); err != nil {
-		env.Ui().Error(fmt.Sprintf("Error encoding: %s", err))
+		c.Ui.Error(fmt.Sprintf("Error encoding: %s", err))
 		return 1
 	}
 
 	result := indented.String()
 	result = strings.Replace(result, `\u003c`, "<", -1)
 	result = strings.Replace(result, `\u003e`, ">", -1)
-	env.Ui().Say(result)
+	c.Ui.Say(result)
+
+	if flagValidate {
+		// Attempt to parse and validate the template
+		tpl, err := template.Parse(strings.NewReader(result))
+		if err != nil {
+			c.Ui.Error(fmt.Sprintf(
+				"Error! Fixed template fails to parse: %s\n\n"+
+					"This is usually caused by an error in the input template.\n"+
+					"Please fix the error and try again.",
+				err))
+			return 1
+		}
+		if err := tpl.Validate(); err != nil {
+			c.Ui.Error(fmt.Sprintf(
+				"Error! Fixed template failed to validate: %s\n\n"+
+					"This is usually caused by an error in the input template.\n"+
+					"Please fix the error and try again.",
+				err))
+			return 1
+		}
+	}
+
 	return 0
 }
 
@@ -109,6 +129,11 @@ Fixes that are run:
   pp-vagrant-override Replaces old-style provider overrides for the Vagrant
                       post-processor to new-style as of Packer 0.5.0.
   virtualbox-rename   Updates "virtualbox" builders to "virtualbox-iso"
+  vmware-rename       Updates "vmware" builders to "vmware-iso"
+
+Options:
+
+  -validate=true      If true (default), validates the fixed template.
 `
 
 	return strings.TrimSpace(helpText)
@@ -116,4 +141,14 @@ Fixes that are run:
 
 func (c *FixCommand) Synopsis() string {
 	return "fixes templates from old versions of packer"
+}
+
+func (c *FixCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (c *FixCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-validate": complete.PredictNothing,
+	}
 }

@@ -6,9 +6,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mitchellh/goamz/aws"
-	"github.com/mitchellh/goamz/ec2"
-	"github.com/mitchellh/packer/packer"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer/packer"
 )
 
 // Artifact is an artifact implementation that contains built AMIs.
@@ -20,7 +21,7 @@ type Artifact struct {
 	BuilderIdValue string
 
 	// EC2 connection for performing API stuff.
-	Conn *ec2.EC2
+	Session *session.Session
 }
 
 func (a *Artifact) BuilderId() string {
@@ -50,7 +51,7 @@ func (a *Artifact) String() string {
 	}
 
 	sort.Strings(amiStrings)
-	return fmt.Sprintf("AMIs were created:\n\n%s", strings.Join(amiStrings, "\n"))
+	return fmt.Sprintf("AMIs were created:\n%s\n", strings.Join(amiStrings, "\n"))
 }
 
 func (a *Artifact) State(name string) interface{} {
@@ -67,8 +68,28 @@ func (a *Artifact) Destroy() error {
 
 	for region, imageId := range a.Amis {
 		log.Printf("Deregistering image ID (%s) from region (%s)", imageId, region)
-		regionconn := ec2.New(a.Conn.Auth, aws.Regions[region])
-		if _, err := regionconn.DeregisterImage(imageId); err != nil {
+
+		regionConn := ec2.New(a.Session, &aws.Config{
+			Region: aws.String(region),
+		})
+
+		// Get image metadata
+		imageResp, err := regionConn.DescribeImages(&ec2.DescribeImagesInput{
+			ImageIds: []*string{&imageId},
+		})
+		if err != nil {
+			errors = append(errors, err)
+		}
+		if len(imageResp.Images) == 0 {
+			err := fmt.Errorf("Error retrieving details for AMI (%s), no images found", imageId)
+			errors = append(errors, err)
+		}
+
+		// Deregister ami
+		input := &ec2.DeregisterImageInput{
+			ImageId: &imageId,
+		}
+		if _, err := regionConn.DeregisterImage(input); err != nil {
 			errors = append(errors, err)
 		}
 
@@ -79,7 +100,7 @@ func (a *Artifact) Destroy() error {
 		if len(errors) == 1 {
 			return errors[0]
 		} else {
-			return &packer.MultiError{errors}
+			return &packer.MultiError{Errors: errors}
 		}
 	}
 

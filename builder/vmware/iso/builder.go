@@ -3,27 +3,35 @@ package iso
 import (
 	"errors"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	vmwcommon "github.com/mitchellh/packer/builder/vmware/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"os"
-	"strings"
+	"strconv"
 	"time"
+
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/common/bootcommand"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const BuilderIdESX = "mitchellh.vmware-esx"
 
 type Builder struct {
-	config config
+	config Config
 	runner multistep.Runner
 }
 
-type config struct {
+type Config struct {
 	common.PackerConfig      `mapstructure:",squash"`
+	common.HTTPConfig        `mapstructure:",squash"`
+	common.ISOConfig         `mapstructure:",squash"`
+	common.FloppyConfig      `mapstructure:",squash"`
+	bootcommand.VNCConfig    `mapstructure:",squash"`
 	vmwcommon.DriverConfig   `mapstructure:",squash"`
 	vmwcommon.OutputConfig   `mapstructure:",squash"`
 	vmwcommon.RunConfig      `mapstructure:",squash"`
@@ -32,20 +40,43 @@ type config struct {
 	vmwcommon.ToolsConfig    `mapstructure:",squash"`
 	vmwcommon.VMXConfig      `mapstructure:",squash"`
 
-	DiskName        string   `mapstructure:"vmdk_name"`
-	DiskSize        uint     `mapstructure:"disk_size"`
-	DiskTypeId      string   `mapstructure:"disk_type_id"`
-	FloppyFiles     []string `mapstructure:"floppy_files"`
-	GuestOSType     string   `mapstructure:"guest_os_type"`
-	ISOChecksum     string   `mapstructure:"iso_checksum"`
-	ISOChecksumType string   `mapstructure:"iso_checksum_type"`
-	ISOUrls         []string `mapstructure:"iso_urls"`
-	Version         string   `mapstructure:"version"`
-	VMName          string   `mapstructure:"vm_name"`
-	BootCommand     []string `mapstructure:"boot_command"`
-	SkipCompaction  bool     `mapstructure:"skip_compaction"`
-	VMXTemplatePath string   `mapstructure:"vmx_template_path"`
+	// disk drives
+	AdditionalDiskSize []uint `mapstructure:"disk_additional_size"`
+	DiskAdapterType    string `mapstructure:"disk_adapter_type"`
+	DiskName           string `mapstructure:"vmdk_name"`
+	DiskSize           uint   `mapstructure:"disk_size"`
+	DiskTypeId         string `mapstructure:"disk_type_id"`
+	Format             string `mapstructure:"format"`
 
+	// cdrom drive
+	CdromAdapterType string `mapstructure:"cdrom_adapter_type"`
+
+	// platform information
+	GuestOSType string `mapstructure:"guest_os_type"`
+	Version     string `mapstructure:"version"`
+	VMName      string `mapstructure:"vm_name"`
+
+	// Network adapter and type
+	NetworkAdapterType string `mapstructure:"network_adapter_type"`
+	Network            string `mapstructure:"network"`
+
+	// device presence
+	Sound bool `mapstructure:"sound"`
+	USB   bool `mapstructure:"usb"`
+
+	// communication ports
+	Serial   string `mapstructure:"serial"`
+	Parallel string `mapstructure:"parallel"`
+
+	// booting a guest
+	KeepRegistered      bool     `mapstructure:"keep_registered"`
+	OVFToolOptions      []string `mapstructure:"ovftool_options"`
+	SkipCompaction      bool     `mapstructure:"skip_compaction"`
+	SkipExport          bool     `mapstructure:"skip_export"`
+	VMXDiskTemplatePath string   `mapstructure:"vmx_disk_template_path"`
+	VMXTemplatePath     string   `mapstructure:"vmx_template_path"`
+
+	// remote vsphere
 	RemoteType           string `mapstructure:"remote_type"`
 	RemoteDatastore      string `mapstructure:"remote_datastore"`
 	RemoteCacheDatastore string `mapstructure:"remote_cache_datastore"`
@@ -54,35 +85,46 @@ type config struct {
 	RemotePort           uint   `mapstructure:"remote_port"`
 	RemoteUser           string `mapstructure:"remote_username"`
 	RemotePassword       string `mapstructure:"remote_password"`
+	RemotePrivateKey     string `mapstructure:"remote_private_key_file"`
 
-	RawSingleISOUrl string `mapstructure:"iso_url"`
+	CommConfig communicator.Config `mapstructure:",squash"`
 
-	tpl *packer.ConfigTemplate
+	ctx interpolate.Context
 }
 
 func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
-	md, err := common.DecodeConfig(&b.config, raws...)
+	err := config.Decode(&b.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &b.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"boot_command",
+				"tools_upload_path",
+			},
+		},
+	}, raws...)
 	if err != nil {
 		return nil, err
 	}
 
-	b.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return nil, err
-	}
-	b.config.tpl.UserVars = b.config.PackerUserVars
-
-	// Accumulate any errors
-	errs := common.CheckUnusedConfig(md)
-	errs = packer.MultiErrorAppend(errs, b.config.DriverConfig.Prepare(b.config.tpl)...)
-	errs = packer.MultiErrorAppend(errs,
-		b.config.OutputConfig.Prepare(b.config.tpl, &b.config.PackerConfig)...)
-	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(b.config.tpl)...)
-	errs = packer.MultiErrorAppend(errs, b.config.ShutdownConfig.Prepare(b.config.tpl)...)
-	errs = packer.MultiErrorAppend(errs, b.config.SSHConfig.Prepare(b.config.tpl)...)
-	errs = packer.MultiErrorAppend(errs, b.config.ToolsConfig.Prepare(b.config.tpl)...)
-	errs = packer.MultiErrorAppend(errs, b.config.VMXConfig.Prepare(b.config.tpl)...)
+	// Accumulate any errors and warnings
+	var errs *packer.MultiError
 	warnings := make([]string, 0)
+
+	isoWarnings, isoErrs := b.config.ISOConfig.Prepare(&b.config.ctx)
+	warnings = append(warnings, isoWarnings...)
+	errs = packer.MultiErrorAppend(errs, isoErrs...)
+	errs = packer.MultiErrorAppend(errs, b.config.HTTPConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.DriverConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs,
+		b.config.OutputConfig.Prepare(&b.config.ctx, &b.config.PackerConfig)...)
+	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.ShutdownConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.SSHConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.ToolsConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VMXConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.FloppyConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VNCConfig.Prepare(&b.config.ctx)...)
 
 	if b.config.DiskName == "" {
 		b.config.DiskName = "disk"
@@ -92,6 +134,11 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.DiskSize = 40000
 	}
 
+	if b.config.DiskAdapterType == "" {
+		// Default is lsilogic
+		b.config.DiskAdapterType = "lsilogic"
+	}
+
 	if b.config.DiskTypeId == "" {
 		// Default is growable virtual disk split in 2GB files.
 		b.config.DiskTypeId = "1"
@@ -99,10 +146,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		if b.config.RemoteType == "esx5" {
 			b.config.DiskTypeId = "zeroedthick"
 		}
-	}
-
-	if b.config.FloppyFiles == nil {
-		b.config.FloppyFiles = make([]string, 0)
 	}
 
 	if b.config.GuestOSType == "" {
@@ -137,98 +180,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.RemotePort = 22
 	}
 
-	// Errors
-	templates := map[string]*string{
-		"disk_name":              &b.config.DiskName,
-		"guest_os_type":          &b.config.GuestOSType,
-		"iso_checksum":           &b.config.ISOChecksum,
-		"iso_checksum_type":      &b.config.ISOChecksumType,
-		"iso_url":                &b.config.RawSingleISOUrl,
-		"vm_name":                &b.config.VMName,
-		"vmx_template_path":      &b.config.VMXTemplatePath,
-		"remote_type":            &b.config.RemoteType,
-		"remote_host":            &b.config.RemoteHost,
-		"remote_datastore":       &b.config.RemoteDatastore,
-		"remote_cache_datastore": &b.config.RemoteCacheDatastore,
-		"remote_cache_directory": &b.config.RemoteCacheDirectory,
-		"remote_user":            &b.config.RemoteUser,
-		"remote_password":        &b.config.RemotePassword,
-	}
-
-	for n, ptr := range templates {
-		var err error
-		*ptr, err = b.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", n, err))
-		}
-	}
-
-	for i, url := range b.config.ISOUrls {
-		var err error
-		b.config.ISOUrls[i], err = b.config.tpl.Process(url, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing iso_urls[%d]: %s", i, err))
-		}
-	}
-
-	for i, command := range b.config.BootCommand {
-		if err := b.config.tpl.Validate(command); err != nil {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("Error processing boot_command[%d]: %s", i, err))
-		}
-	}
-
-	for i, file := range b.config.FloppyFiles {
-		var err error
-		b.config.FloppyFiles[i], err = b.config.tpl.Process(file, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("Error processing floppy_files[%d]: %s",
-					i, err))
-		}
-	}
-
-	if b.config.ISOChecksumType == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("The iso_checksum_type must be specified."))
-	} else {
-		b.config.ISOChecksumType = strings.ToLower(b.config.ISOChecksumType)
-		if b.config.ISOChecksumType != "none" {
-			if b.config.ISOChecksum == "" {
-				errs = packer.MultiErrorAppend(
-					errs, errors.New("Due to large file sizes, an iso_checksum is required"))
-			} else {
-				b.config.ISOChecksum = strings.ToLower(b.config.ISOChecksum)
-			}
-
-			if h := common.HashForType(b.config.ISOChecksumType); h == nil {
-				errs = packer.MultiErrorAppend(
-					errs,
-					fmt.Errorf("Unsupported checksum type: %s", b.config.ISOChecksumType))
-			}
-		}
-	}
-
-	if b.config.RawSingleISOUrl == "" && len(b.config.ISOUrls) == 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("One of iso_url or iso_urls must be specified."))
-	} else if b.config.RawSingleISOUrl != "" && len(b.config.ISOUrls) > 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("Only one of iso_url or iso_urls may be specified."))
-	} else if b.config.RawSingleISOUrl != "" {
-		b.config.ISOUrls = []string{b.config.RawSingleISOUrl}
-	}
-
-	for i, url := range b.config.ISOUrls {
-		b.config.ISOUrls[i], err = common.DownloadableURL(url)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Failed to parse iso_url %d: %s", i+1, err))
-		}
-	}
-
 	if b.config.VMXTemplatePath != "" {
 		if err := b.validateVMXTemplatePath(); err != nil {
 			errs = packer.MultiErrorAppend(
@@ -237,25 +188,48 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 
 	}
 
+	if b.config.Network == "" {
+		b.config.Network = "nat"
+	}
+
+	if !b.config.Sound {
+		b.config.Sound = false
+	}
+
+	if !b.config.USB {
+		b.config.USB = false
+	}
+
 	// Remote configuration validation
 	if b.config.RemoteType != "" {
 		if b.config.RemoteHost == "" {
 			errs = packer.MultiErrorAppend(errs,
 				fmt.Errorf("remote_host must be specified"))
 		}
+		if b.config.RemoteType != "esx5" {
+			errs = packer.MultiErrorAppend(errs,
+				fmt.Errorf("Only 'esx5' value is accepted for remote_type"))
+		}
+	}
+
+	if b.config.Format != "" {
+		if !(b.config.Format == "ova" || b.config.Format == "ovf" || b.config.Format == "vmx") {
+			errs = packer.MultiErrorAppend(errs,
+				fmt.Errorf("format must be one of ova, ovf, or vmx"))
+		}
 	}
 
 	// Warnings
-	if b.config.ISOChecksumType == "none" {
-		warnings = append(warnings,
-			"A checksum type of 'none' was specified. Since ISO files are so big,\n"+
-				"a checksum is highly recommended.")
-	}
-
 	if b.config.ShutdownCommand == "" {
 		warnings = append(warnings,
 			"A shutdown_command was not specified. Without a shutdown command, Packer\n"+
 				"will forcibly halt the virtual machine, which may result in data loss.")
+	}
+
+	if b.config.Headless && b.config.DisableVNC {
+		warnings = append(warnings,
+			"Headless mode uses VNC to retrieve output. Since VNC has been disabled,\n"+
+				"you won't be able to see any output.")
 	}
 
 	if errs != nil && len(errs.Errors) > 0 {
@@ -279,19 +253,23 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	default:
 		dir = new(vmwcommon.LocalOutputDir)
 	}
+
+	exportOutputPath := b.config.OutputDir
+
+	if b.config.RemoteType != "" && b.config.Format != "" {
+		b.config.OutputDir = b.config.VMName
+	}
 	dir.SetOutputDir(b.config.OutputDir)
 
 	// Setup the state bag
 	state := new(multistep.BasicStateBag)
 	state.Put("cache", cache)
 	state.Put("config", &b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("dir", dir)
 	state.Put("driver", driver)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
-
-	// Seed the random number generator
-	rand.Seed(time.Now().UTC().UnixNano())
 
 	steps := []multistep.Step{
 		&vmwcommon.StepPrepareTools{
@@ -302,18 +280,22 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Checksum:     b.config.ISOChecksum,
 			ChecksumType: b.config.ISOChecksumType,
 			Description:  "ISO",
+			Extension:    b.config.TargetExtension,
 			ResultKey:    "iso_path",
+			TargetPath:   b.config.TargetPath,
 			Url:          b.config.ISOUrls,
 		},
 		&vmwcommon.StepOutputDir{
 			Force: b.config.PackerForce,
 		},
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
 		&stepRemoteUpload{
-			Key:     "floppy_path",
-			Message: "Uploading Floppy to remote machine...",
+			Key:       "floppy_path",
+			Message:   "Uploading Floppy to remote machine...",
+			DoCleanup: true,
 		},
 		&stepRemoteUpload{
 			Key:     "iso_path",
@@ -325,37 +307,42 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			CustomData: b.config.VMXData,
 		},
 		&vmwcommon.StepSuppressMessages{},
-		&vmwcommon.StepHTTPServer{
+		&common.StepHTTPServer{
 			HTTPDir:     b.config.HTTPDir,
 			HTTPPortMin: b.config.HTTPPortMin,
 			HTTPPortMax: b.config.HTTPPortMax,
 		},
 		&vmwcommon.StepConfigureVNC{
-			VNCPortMin: b.config.VNCPortMin,
-			VNCPortMax: b.config.VNCPortMax,
+			Enabled:            !b.config.DisableVNC,
+			VNCBindAddress:     b.config.VNCBindAddress,
+			VNCPortMin:         b.config.VNCPortMin,
+			VNCPortMax:         b.config.VNCPortMax,
+			VNCDisablePassword: b.config.VNCDisablePassword,
 		},
-		&StepRegister{},
+		&StepRegister{
+			Format: b.config.Format,
+		},
 		&vmwcommon.StepRun{
-			BootWait:           b.config.BootWait,
 			DurationBeforeStop: 5 * time.Second,
 			Headless:           b.config.Headless,
 		},
 		&vmwcommon.StepTypeBootCommand{
-			BootCommand: b.config.BootCommand,
+			BootWait:    b.config.BootWait,
+			VNCEnabled:  !b.config.DisableVNC,
+			BootCommand: b.config.FlatBootCommand(),
 			VMName:      b.config.VMName,
-			Tpl:         b.config.tpl,
+			Ctx:         b.config.ctx,
 		},
-		&common.StepConnectSSH{
-			SSHAddress:     driver.SSHAddress,
-			SSHConfig:      vmwcommon.SSHConfigFunc(&b.config.SSHConfig),
-			SSHWaitTimeout: b.config.SSHWaitTimeout,
-			NoPty:          b.config.SSHSkipRequestPty,
+		&communicator.StepConnect{
+			Config:    &b.config.SSHConfig.Comm,
+			Host:      driver.CommHost,
+			SSHConfig: vmwcommon.SSHConfigFunc(&b.config.SSHConfig),
 		},
 		&vmwcommon.StepUploadTools{
 			RemoteType:        b.config.RemoteType,
 			ToolsUploadFlavor: b.config.ToolsUploadFlavor,
 			ToolsUploadPath:   b.config.ToolsUploadPath,
-			Tpl:               b.config.tpl,
+			Ctx:               b.config.ctx,
 		},
 		&common.StepProvision{},
 		&vmwcommon.StepShutdown{
@@ -363,29 +350,29 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Timeout: b.config.ShutdownTimeout,
 		},
 		&vmwcommon.StepCleanFiles{},
+		&vmwcommon.StepCompactDisk{
+			Skip: b.config.SkipCompaction,
+		},
 		&vmwcommon.StepConfigureVMX{
 			CustomData: b.config.VMXDataPost,
 			SkipFloppy: true,
 		},
-		&vmwcommon.StepCleanVMX{},
-		&StepUploadVMX{
-			RemoteType:        b.config.RemoteType,
+		&vmwcommon.StepCleanVMX{
+			RemoveEthernetInterfaces: b.config.VMXConfig.VMXRemoveEthernet,
+			VNCEnabled:               !b.config.DisableVNC,
 		},
-		&vmwcommon.StepCompactDisk{
-			Skip: b.config.SkipCompaction,
+		&StepUploadVMX{
+			RemoteType: b.config.RemoteType,
+		},
+		&StepExport{
+			Format:     b.config.Format,
+			SkipExport: b.config.SkipExport,
+			OutputDir:  exportOutputPath,
 		},
 	}
 
 	// Run!
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// If there was an error, return that
@@ -403,7 +390,14 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	}
 
 	// Compile the artifact list
-	files, err := state.Get("dir").(OutputDir).ListFiles()
+	var files []string
+	if b.config.RemoteType != "" && b.config.Format != "" && !b.config.SkipExport {
+		dir = new(vmwcommon.LocalOutputDir)
+		dir.SetOutputDir(exportOutputPath)
+		files, err = dir.ListFiles()
+	} else {
+		files, err = state.Get("dir").(OutputDir).ListFiles()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -414,10 +408,17 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		builderId = BuilderIdESX
 	}
 
+	config := make(map[string]string)
+	config[ArtifactConfKeepRegistered] = strconv.FormatBool(b.config.KeepRegistered)
+	config[ArtifactConfFormat] = b.config.Format
+	config[ArtifactConfSkipExport] = strconv.FormatBool(b.config.SkipExport)
+
 	return &Artifact{
 		builderId: builderId,
+		id:        b.config.VMName,
 		dir:       dir,
 		f:         files,
+		config:    config,
 	}, nil
 }
 
@@ -440,5 +441,5 @@ func (b *Builder) validateVMXTemplatePath() error {
 		return err
 	}
 
-	return b.config.tpl.Validate(string(data))
+	return interpolate.Validate(string(data), &b.config.ctx)
 }

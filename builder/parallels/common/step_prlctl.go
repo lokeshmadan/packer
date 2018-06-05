@@ -1,18 +1,21 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"strings"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type commandTemplate struct {
 	Name string
 }
 
-// This step executes additional prlctl commands as specified by the
-// template.
+// StepPrlctl is a step that executes additional `prlctl` commands as specified.
+// by the template.
 //
 // Uses:
 //   driver Driver
@@ -22,10 +25,11 @@ type commandTemplate struct {
 // Produces:
 type StepPrlctl struct {
 	Commands [][]string
-	Tpl      *packer.ConfigTemplate
+	Ctx      interpolate.Context
 }
 
-func (s *StepPrlctl) Run(state multistep.StateBag) multistep.StepAction {
+// Run executes `prlctl` commands.
+func (s *StepPrlctl) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
@@ -34,7 +38,7 @@ func (s *StepPrlctl) Run(state multistep.StateBag) multistep.StepAction {
 		ui.Say("Executing custom prlctl commands...")
 	}
 
-	tplData := &commandTemplate{
+	s.Ctx.Data = &commandTemplate{
 		Name: vmName,
 	}
 
@@ -44,9 +48,9 @@ func (s *StepPrlctl) Run(state multistep.StateBag) multistep.StepAction {
 
 		for i, arg := range command {
 			var err error
-			command[i], err = s.Tpl.Process(arg, tplData)
+			command[i], err = interpolate.Render(arg, &s.Ctx)
 			if err != nil {
-				err := fmt.Errorf("Error preparing prlctl command: %s", err)
+				err = fmt.Errorf("Error preparing prlctl command: %s", err)
 				state.Put("error", err)
 				ui.Error(err.Error())
 				return multistep.ActionHalt
@@ -55,7 +59,7 @@ func (s *StepPrlctl) Run(state multistep.StateBag) multistep.StepAction {
 
 		ui.Message(fmt.Sprintf("Executing: prlctl %s", strings.Join(command, " ")))
 		if err := driver.Prlctl(command...); err != nil {
-			err := fmt.Errorf("Error executing command: %s", err)
+			err = fmt.Errorf("Error executing command: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
@@ -65,4 +69,5 @@ func (s *StepPrlctl) Run(state multistep.StateBag) multistep.StepAction {
 	return multistep.ActionContinue
 }
 
+// Cleanup does nothing.
 func (s *StepPrlctl) Cleanup(state multistep.StateBag) {}

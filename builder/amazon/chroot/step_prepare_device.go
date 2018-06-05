@@ -1,19 +1,20 @@
 package chroot
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
 	"os"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // StepPrepareDevice finds an available device and sets it.
 type StepPrepareDevice struct {
-	mounts []string
 }
 
-func (s *StepPrepareDevice) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepPrepareDevice) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	ui := state.Get("ui").(packer.Ui)
 

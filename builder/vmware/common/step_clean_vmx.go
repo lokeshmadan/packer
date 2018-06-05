@@ -1,12 +1,14 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
 	"regexp"
 	"strings"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step cleans up the VMX by removing or changing this prior to
@@ -18,9 +20,12 @@ import (
 //
 // Produces:
 //   <nothing>
-type StepCleanVMX struct{}
+type StepCleanVMX struct {
+	RemoveEthernetInterfaces bool
+	VNCEnabled               bool
+}
 
-func (s StepCleanVMX) Run(state multistep.StateBag) multistep.StepAction {
+func (s StepCleanVMX) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packer.Ui)
 	vmxPath := state.Get("vmx_path").(string)
 
@@ -34,7 +39,7 @@ func (s StepCleanVMX) Run(state multistep.StateBag) multistep.StepAction {
 
 	// Delete the floppy0 entries so the floppy is no longer mounted
 	ui.Message("Unmounting floppy from VMX...")
-	for k, _ := range vmxData {
+	for k := range vmxData {
 		if strings.HasPrefix(k, "floppy0.") {
 			log.Printf("Deleting key: %s", k)
 			delete(vmxData, k)
@@ -53,6 +58,22 @@ func (s StepCleanVMX) Run(state multistep.StateBag) multistep.StepAction {
 
 		vmxData[ide+"devicetype"] = "cdrom-raw"
 		vmxData[ide+"filename"] = "auto detect"
+		vmxData[ide+"clientdevice"] = "TRUE"
+	}
+
+	if s.VNCEnabled {
+		ui.Message("Disabling VNC server...")
+		vmxData["remotedisplay.vnc.enabled"] = "FALSE"
+	}
+
+	if s.RemoveEthernetInterfaces {
+		ui.Message("Removing Ethernet Interfaces...")
+		for k := range vmxData {
+			if strings.HasPrefix(k, "ethernet") {
+				log.Printf("Deleting key: %s", k)
+				delete(vmxData, k)
+			}
+		}
 	}
 
 	// Rewrite the VMX

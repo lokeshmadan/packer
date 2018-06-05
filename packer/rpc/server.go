@@ -1,16 +1,13 @@
 package rpc
 
 import (
-	"fmt"
-	"github.com/hashicorp/go-msgpack/codec"
-	"github.com/mitchellh/packer/packer"
 	"io"
 	"log"
 	"net/rpc"
-	"sync/atomic"
-)
 
-var endpointId uint64
+	"github.com/hashicorp/packer/packer"
+	"github.com/ugorji/go/codec"
+)
 
 const (
 	DefaultArtifactEndpoint      string = "Artifact"
@@ -19,7 +16,6 @@ const (
 	DefaultCacheEndpoint                = "Cache"
 	DefaultCommandEndpoint              = "Command"
 	DefaultCommunicatorEndpoint         = "Communicator"
-	DefaultEnvironmentEndpoint          = "Environment"
 	DefaultHookEndpoint                 = "Hook"
 	DefaultPostProcessorEndpoint        = "PostProcessor"
 	DefaultProvisionerEndpoint          = "Provisioner"
@@ -95,13 +91,6 @@ func (s *Server) RegisterCommunicator(c packer.Communicator) {
 	})
 }
 
-func (s *Server) RegisterEnvironment(b packer.Environment) {
-	s.server.RegisterName(DefaultEnvironmentEndpoint, &EnvironmentServer{
-		env: b,
-		mux: s.mux,
-	})
-}
-
 func (s *Server) RegisterHook(h packer.Hook) {
 	s.server.RegisterName(DefaultHookEndpoint, &HookServer{
 		hook: h,
@@ -147,19 +136,4 @@ func (s *Server) Serve() {
 	}
 	rpcCodec := codec.GoRpc.ServerCodec(stream, h)
 	s.server.ServeCodec(rpcCodec)
-}
-
-// registerComponent registers a single Packer RPC component onto
-// the RPC server. If id is true, then a unique ID number will be appended
-// onto the end of the endpoint.
-//
-// The endpoint name is returned.
-func registerComponent(server *rpc.Server, name string, rcvr interface{}, id bool) string {
-	endpoint := name
-	if id {
-		fmt.Sprintf("%s.%d", endpoint, atomic.AddUint64(&endpointId, 1))
-	}
-
-	server.RegisterName(endpoint, rcvr)
-	return endpoint
 }

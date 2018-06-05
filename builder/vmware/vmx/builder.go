@@ -6,10 +6,11 @@ import (
 	"log"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	vmwcommon "github.com/mitchellh/packer/builder/vmware/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // Builder implements packer.Builder and builds the actual VMware
@@ -31,7 +32,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 }
 
 // Run executes a Packer build and returns a packer.Artifact representing
-// a VirtualBox appliance.
+// a VMware image.
 func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
 	driver, err := vmwcommon.NewDriver(&b.config.DriverConfig, &b.config.SSHConfig)
 	if err != nil {
@@ -45,6 +46,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	// Set up the state.
 	state := new(multistep.BasicStateBag)
 	state.Put("config", b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("dir", dir)
 	state.Put("driver", driver)
 	state.Put("hook", hook)
@@ -60,7 +62,8 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Force: b.config.PackerForce,
 		},
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
 		&StepCloneVMX{
 			OutputDir: b.config.OutputDir,
@@ -71,36 +74,39 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			CustomData: b.config.VMXData,
 		},
 		&vmwcommon.StepSuppressMessages{},
-		&vmwcommon.StepHTTPServer{
+		&common.StepHTTPServer{
 			HTTPDir:     b.config.HTTPDir,
 			HTTPPortMin: b.config.HTTPPortMin,
 			HTTPPortMax: b.config.HTTPPortMax,
 		},
 		&vmwcommon.StepConfigureVNC{
-			VNCPortMin: b.config.VNCPortMin,
-			VNCPortMax: b.config.VNCPortMax,
+			Enabled:            !b.config.DisableVNC,
+			VNCBindAddress:     b.config.VNCBindAddress,
+			VNCPortMin:         b.config.VNCPortMin,
+			VNCPortMax:         b.config.VNCPortMax,
+			VNCDisablePassword: b.config.VNCDisablePassword,
 		},
 		&vmwcommon.StepRun{
-			BootWait:           b.config.BootWait,
 			DurationBeforeStop: 5 * time.Second,
 			Headless:           b.config.Headless,
 		},
 		&vmwcommon.StepTypeBootCommand{
-			BootCommand: b.config.BootCommand,
+			BootWait:    b.config.BootWait,
+			VNCEnabled:  !b.config.DisableVNC,
+			BootCommand: b.config.FlatBootCommand(),
 			VMName:      b.config.VMName,
-			Tpl:         b.config.tpl,
+			Ctx:         b.config.ctx,
 		},
-		&common.StepConnectSSH{
-			SSHAddress:     driver.SSHAddress,
-			SSHConfig:      vmwcommon.SSHConfigFunc(&b.config.SSHConfig),
-			SSHWaitTimeout: b.config.SSHWaitTimeout,
-			NoPty:          b.config.SSHSkipRequestPty,
+		&communicator.StepConnect{
+			Config:    &b.config.SSHConfig.Comm,
+			Host:      driver.CommHost,
+			SSHConfig: vmwcommon.SSHConfigFunc(&b.config.SSHConfig),
 		},
 		&vmwcommon.StepUploadTools{
 			RemoteType:        b.config.RemoteType,
 			ToolsUploadFlavor: b.config.ToolsUploadFlavor,
 			ToolsUploadPath:   b.config.ToolsUploadPath,
-			Tpl:               b.config.tpl,
+			Ctx:               b.config.ctx,
 		},
 		&common.StepProvision{},
 		&vmwcommon.StepShutdown{
@@ -108,25 +114,21 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Timeout: b.config.ShutdownTimeout,
 		},
 		&vmwcommon.StepCleanFiles{},
+		&vmwcommon.StepCompactDisk{
+			Skip: b.config.SkipCompaction,
+		},
 		&vmwcommon.StepConfigureVMX{
 			CustomData: b.config.VMXDataPost,
 			SkipFloppy: true,
 		},
-		&vmwcommon.StepCleanVMX{},
-		&vmwcommon.StepCompactDisk{
-			Skip: b.config.SkipCompaction,
+		&vmwcommon.StepCleanVMX{
+			RemoveEthernetInterfaces: b.config.VMXConfig.VMXRemoveEthernet,
+			VNCEnabled:               !b.config.DisableVNC,
 		},
 	}
 
 	// Run the steps.
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// Report any errors.
@@ -143,7 +145,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		return nil, errors.New("Build was halted.")
 	}
 
-	return vmwcommon.NewLocalArtifact(b.config.OutputDir)
+	return vmwcommon.NewLocalArtifact(b.config.VMName, b.config.OutputDir)
 }
 
 // Cancel.

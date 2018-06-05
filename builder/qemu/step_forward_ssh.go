@@ -1,13 +1,14 @@
 package qemu
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step adds a NAT port forwarding definition so that SSH is available
@@ -18,19 +19,15 @@ import (
 // Produces:
 type stepForwardSSH struct{}
 
-func (s *stepForwardSSH) Run(state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*config)
+func (s *stepForwardSSH) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
 	ui := state.Get("ui").(packer.Ui)
 
-	log.Printf("Looking for available SSH port between %d and %d", config.SSHHostPortMin, config.SSHHostPortMax)
+	log.Printf("Looking for available communicator (SSH, WinRM, etc) port between %d and %d", config.SSHHostPortMin, config.SSHHostPortMax)
 	var sshHostPort uint
-	var offset uint = 0
 
-	portRange := int(config.SSHHostPortMax - config.SSHHostPortMin)
-	if portRange > 0 {
-		// Have to check if > 0 to avoid a panic
-		offset = uint(rand.Intn(portRange))
-	}
+	portRange := config.SSHHostPortMax - config.SSHHostPortMin + 1
+	offset := uint(rand.Intn(int(portRange)))
 
 	for {
 		sshHostPort = offset + config.SSHHostPortMin
@@ -40,8 +37,12 @@ func (s *stepForwardSSH) Run(state multistep.StateBag) multistep.StepAction {
 			defer l.Close()
 			break
 		}
+		offset++
+		if offset == portRange {
+			offset = 0
+		}
 	}
-	ui.Say(fmt.Sprintf("Found port for SSH: %d.", sshHostPort))
+	ui.Say(fmt.Sprintf("Found port for communicator (SSH, WinRM, etc): %d.", sshHostPort))
 
 	// Save the port we're using so that future steps can use it
 	state.Put("sshHostPort", sshHostPort)

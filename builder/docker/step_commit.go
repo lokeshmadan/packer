@@ -1,9 +1,11 @@
 package docker
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // StepCommit commits the container to a image.
@@ -11,13 +13,14 @@ type StepCommit struct {
 	imageId string
 }
 
-func (s *StepCommit) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepCommit) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	containerId := state.Get("container_id").(string)
+	config := state.Get("config").(*Config)
 	ui := state.Get("ui").(packer.Ui)
 
 	ui.Say("Committing the container")
-	imageId, err := driver.Commit(containerId)
+	imageId, err := driver.Commit(containerId, config.Author, config.Changes, config.Message)
 	if err != nil {
 		state.Put("error", err)
 		ui.Error(err.Error())

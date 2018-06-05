@@ -1,4 +1,7 @@
 // This is the main package for the `packer` application.
+
+//go:generate go run ./scripts/generate-plugins.go
+//go:generate go generate ./common/bootcommand/...
 package main
 
 import (
@@ -6,14 +9,20 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
+	"time"
 
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/packer/command"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/packer/plugin"
+	"github.com/hashicorp/packer/version"
 	"github.com/mitchellh/cli"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/packer/plugin"
 	"github.com/mitchellh/panicwrap"
 	"github.com/mitchellh/prefixedio"
 )
@@ -30,6 +39,12 @@ func realMain() int {
 	var wrapConfig panicwrap.WrapConfig
 
 	if !panicwrap.Wrapped(&wrapConfig) {
+		// Generate a UUID for this packer run and pass it to the environment.
+		// GenerateUUID always returns a nil error (based on rand.Read) so we'll
+		// just ignore it.
+		UUID, _ := uuid.GenerateUUID()
+		os.Setenv("PACKER_RUN_UUID", UUID)
+
 		// Determine where logs should go in general (requested by the user)
 		logWriter, err := logOutput()
 		if err != nil {
@@ -39,6 +54,9 @@ func realMain() int {
 		if logWriter == nil {
 			logWriter = ioutil.Discard
 		}
+
+		// Disable logging here
+		log.SetOutput(ioutil.Discard)
 
 		// We always send logs to a temporary file that we use in case
 		// there is a panic. Otherwise, we delete it.
@@ -60,10 +78,19 @@ func realMain() int {
 		outR, outW := io.Pipe()
 		go copyOutput(outR, doneCh)
 
+		// Enable checkpoint for panic reporting
+		if config, _ := loadConfig(); config != nil && !config.DisableCheckpoint {
+			packer.CheckpointReporter = packer.NewCheckpointReporter(
+				config.DisableCheckpointSignature,
+			)
+		}
+
 		// Create the configuration for panicwrap and wrap our executable
 		wrapConfig.Handler = panicHandler(logTempFile)
 		wrapConfig.Writer = io.MultiWriter(logTempFile, logWriter)
 		wrapConfig.Stdout = outW
+		wrapConfig.DetectDuration = 500 * time.Millisecond
+		wrapConfig.ForwardSignals = []os.Signal{syscall.SIGTERM}
 		exitStatus, err := panicwrap.Wrap(&wrapConfig)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Couldn't start Packer: %s", err)
@@ -100,14 +127,17 @@ func wrappedMain() int {
 
 	log.SetOutput(os.Stderr)
 
-	log.Printf(
-		"[INFO] Packer version: %s %s %s",
-		Version, VersionPrerelease, GitCommit)
+	log.Printf("[INFO] Packer version: %s", version.FormattedVersion())
 	log.Printf("Packer Target OS/Arch: %s %s", runtime.GOOS, runtime.GOARCH)
 	log.Printf("Built with Go Version: %s", runtime.Version())
 
+	inPlugin := os.Getenv(plugin.MagicCookieKey) == plugin.MagicCookieValue
+
 	// Prepare stdin for plugin usage by switching it to a pipe
-	setupStdin()
+	// But do not switch to pipe in plugin
+	if !inPlugin {
+		setupStdin()
+	}
 
 	config, err := loadConfig()
 	if err != nil {
@@ -118,6 +148,11 @@ func wrappedMain() int {
 
 	// Fire off the checkpoint.
 	go runCheckpoint(config)
+	if !config.DisableCheckpoint {
+		packer.CheckpointReporter = packer.NewCheckpointReporter(
+			config.DisableCheckpointSignature,
+		)
+	}
 
 	cacheDir := os.Getenv("PACKER_CACHE_DIR")
 	if cacheDir == "" {
@@ -139,15 +174,14 @@ func wrappedMain() int {
 
 	defer plugin.CleanupClients()
 
-	// Create the environment configuration
-	EnvConfig = *packer.DefaultEnvironmentConfig()
-	EnvConfig.Cache = cache
-	EnvConfig.Components.Builder = config.LoadBuilder
-	EnvConfig.Components.Hook = config.LoadHook
-	EnvConfig.Components.PostProcessor = config.LoadPostProcessor
-	EnvConfig.Components.Provisioner = config.LoadProvisioner
+	// Setup the UI if we're being machine-readable
+	var ui packer.Ui = &packer.BasicUi{
+		Reader:      os.Stdin,
+		Writer:      os.Stdout,
+		ErrorWriter: os.Stdout,
+	}
 	if machineReadable {
-		EnvConfig.Ui = &packer.MachineReadableUi{
+		ui = &packer.MachineReadableUi{
 			Writer: os.Stdout,
 		}
 
@@ -159,23 +193,65 @@ func wrappedMain() int {
 		}
 	}
 
-	//setupSignalHandlers(env)
+	// Create the CLI meta
+	CommandMeta = &command.Meta{
+		CoreConfig: &packer.CoreConfig{
+			Components: packer.ComponentFinder{
+				Builder:       config.LoadBuilder,
+				Hook:          config.LoadHook,
+				PostProcessor: config.LoadPostProcessor,
+				Provisioner:   config.LoadProvisioner,
+			},
+			Version: version.Version,
+		},
+		Cache: cache,
+		Ui:    ui,
+	}
 
 	cli := &cli.CLI{
-		Args:       args,
-		Commands:   Commands,
-		HelpFunc:   cli.BasicHelpFunc("packer"),
-		HelpWriter: os.Stdout,
-		Version:    Version,
+		Args:         args,
+		Autocomplete: true,
+		Commands:     Commands,
+		HelpFunc:     excludeHelpFunc(Commands, []string{"plugin"}),
+		HelpWriter:   os.Stdout,
+		Name:         "packer",
+		Version:      version.Version,
 	}
 
 	exitCode, err := cli.Run()
+	if !inPlugin {
+		if err := packer.CheckpointReporter.Finalize(cli.Subcommand(), exitCode, err); err != nil {
+			log.Printf("[WARN] (telemetry) Error finalizing report. This is safe to ignore. %s", err.Error())
+		}
+	}
+
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing CLI: %s\n", err)
 		return 1
 	}
 
 	return exitCode
+}
+
+// excludeHelpFunc filters commands we don't want to show from the list of
+// commands displayed in packer's help text.
+func excludeHelpFunc(commands map[string]cli.CommandFactory, exclude []string) cli.HelpFunc {
+	// Make search slice into a map so we can use use the `if found` idiom
+	// instead of a nested loop.
+	var excludes = make(map[string]interface{}, len(exclude))
+	for _, item := range exclude {
+		excludes[item] = nil
+	}
+
+	// Create filtered list of commands
+	helpCommands := []string{}
+	for command := range commands {
+		if _, found := excludes[command]; !found {
+			helpCommands = append(helpCommands, command)
+		}
+	}
+
+	return cli.FilteredHelpFunc(helpCommands, cli.BasicHelpFunc("packer"))
 }
 
 // extractMachineReadable checks the args for the machine readable
@@ -203,12 +279,12 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 
-	mustExist := true
 	configFilePath := os.Getenv("PACKER_CONFIG")
-	if configFilePath == "" {
+	if configFilePath != "" {
+		log.Printf("'PACKER_CONFIG' set, loading config from environment.")
+	} else {
 		var err error
-		configFilePath, err = configFile()
-		mustExist = false
+		configFilePath, err = packer.ConfigFile()
 
 		if err != nil {
 			log.Printf("Error detecting default config file path: %s", err)
@@ -226,11 +302,7 @@ func loadConfig() (*config, error) {
 			return nil, err
 		}
 
-		if mustExist {
-			return nil, err
-		}
-
-		log.Println("File doesn't exist, but doesn't need to. Ignoring.")
+		log.Printf("[WARN] Config file doesn't exist: %s", configFilePath)
 		return &config, nil
 	}
 	defer f.Close()
@@ -282,4 +354,9 @@ func copyOutput(r io.Reader, doneCh chan<- struct{}) {
 	}()
 
 	wg.Wait()
+}
+
+func init() {
+	// Seed the random number generator
+	rand.Seed(time.Now().UTC().UnixNano())
 }

@@ -1,12 +1,14 @@
 package qemu
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
 	"time"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step shuts down the machine. It first attempts to do so gracefully,
@@ -22,12 +24,30 @@ import (
 //   <nothing>
 type stepShutdown struct{}
 
-func (s *stepShutdown) Run(state multistep.StateBag) multistep.StepAction {
-	comm := state.Get("communicator").(packer.Communicator)
-	config := state.Get("config").(*config)
+func (s *stepShutdown) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 
+	if state.Get("communicator") == nil {
+		cancelCh := make(chan struct{}, 1)
+		go func() {
+			defer close(cancelCh)
+			<-time.After(config.shutdownTimeout)
+		}()
+		ui.Say("Waiting for shutdown...")
+		if ok := driver.WaitForShutdown(cancelCh); ok {
+			log.Println("VM shut down.")
+			return multistep.ActionContinue
+		} else {
+			err := fmt.Errorf("Failed to shutdown")
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
+
+	comm := state.Get("communicator").(packer.Communicator)
 	if config.ShutdownCommand != "" {
 		ui.Say("Gracefully halting virtual machine...")
 		log.Printf("Executing shutdown command: %s", config.ShutdownCommand)

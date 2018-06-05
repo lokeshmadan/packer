@@ -1,11 +1,12 @@
 package iso
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
-	"github.com/mitchellh/packer/packer"
-	"time"
+
+	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step creates the actual virtual machine.
@@ -16,8 +17,8 @@ type stepCreateVM struct {
 	vmName string
 }
 
-func (s *stepCreateVM) Run(state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*config)
+func (s *stepCreateVM) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(vboxcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
 
@@ -64,19 +65,17 @@ func (s *stepCreateVM) Cleanup(state multistep.StateBag) {
 
 	driver := state.Get("driver").(vboxcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
+	config := state.Get("config").(*Config)
 
-	ui.Say("Unregistering and deleting virtual machine...")
-	var err error = nil
-	for i := 0; i < 5; i++ {
-		err = driver.VBoxManage("unregistervm", s.vmName, "--delete")
-		if err == nil {
-			break
-		}
-
-		time.Sleep(1 * time.Second * time.Duration(i))
+	_, cancelled := state.GetOk(multistep.StateCancelled)
+	_, halted := state.GetOk(multistep.StateHalted)
+	if (config.KeepRegistered) && (!cancelled && !halted) {
+		ui.Say("Keeping virtual machine registered with VirtualBox host (keep_registered = true)")
+		return
 	}
 
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error deleting virtual machine: %s", err))
+	ui.Say("Deregistering and deleting VM...")
+	if err := driver.Delete(s.vmName); err != nil {
+		ui.Error(fmt.Sprintf("Error deleting VM: %s", err))
 	}
 }

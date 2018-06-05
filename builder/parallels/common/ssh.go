@@ -1,41 +1,41 @@
 package common
 
 import (
-	"fmt"
-
-	"code.google.com/p/go.crypto/ssh"
-	"github.com/mitchellh/multistep"
-	commonssh "github.com/mitchellh/packer/common/ssh"
-	packerssh "github.com/mitchellh/packer/communicator/ssh"
+	commonssh "github.com/hashicorp/packer/common/ssh"
+	packerssh "github.com/hashicorp/packer/communicator/ssh"
+	"github.com/hashicorp/packer/helper/multistep"
+	"golang.org/x/crypto/ssh"
 )
 
-func SSHAddress(state multistep.StateBag) (string, error) {
+// CommHost returns the VM's IP address which should be used to access it by SSH.
+func CommHost(state multistep.StateBag) (string, error) {
 	vmName := state.Get("vmName").(string)
 	driver := state.Get("driver").(Driver)
 
-	mac, err := driver.Mac(vmName)
+	mac, err := driver.MAC(vmName)
 	if err != nil {
 		return "", err
 	}
 
-	ip, err := driver.IpAddress(mac)
+	ip, err := driver.IPAddress(mac)
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s:22", ip), nil
+	return ip, nil
 }
 
+// SSHConfigFunc returns SSH credentials to access the VM by SSH.
 func SSHConfigFunc(config SSHConfig) func(multistep.StateBag) (*ssh.ClientConfig, error) {
 	return func(state multistep.StateBag) (*ssh.ClientConfig, error) {
 		auth := []ssh.AuthMethod{
-			ssh.Password(config.SSHPassword),
+			ssh.Password(config.Comm.SSHPassword),
 			ssh.KeyboardInteractive(
-				packerssh.PasswordKeyboardInteractive(config.SSHPassword)),
+				packerssh.PasswordKeyboardInteractive(config.Comm.SSHPassword)),
 		}
 
-		if config.SSHKeyPath != "" {
-			signer, err := commonssh.FileSigner(config.SSHKeyPath)
+		if config.Comm.SSHPrivateKey != "" {
+			signer, err := commonssh.FileSigner(config.Comm.SSHPrivateKey)
 			if err != nil {
 				return nil, err
 			}
@@ -44,8 +44,9 @@ func SSHConfigFunc(config SSHConfig) func(multistep.StateBag) (*ssh.ClientConfig
 		}
 
 		return &ssh.ClientConfig{
-			User: config.SSHUser,
-			Auth: auth,
+			User:            config.Comm.SSHUsername,
+			Auth:            auth,
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		}, nil
 	}
 }

@@ -6,19 +6,22 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
-const DefaultRemotePath = "/tmp/script.sh"
-
-type config struct {
+type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
 
 	// If true, the script contains binary and line endings will not be
@@ -42,8 +45,17 @@ type config struct {
 	// your command(s) are executed.
 	Vars []string `mapstructure:"environment_vars"`
 
+	// The remote folder where the local shell script will be uploaded to.
+	// This should be set to a pre-existing directory, it defaults to /tmp
+	RemoteFolder string `mapstructure:"remote_folder"`
+
+	// The remote file name of the local shell script.
+	// This defaults to script_nnn.sh
+	RemoteFile string `mapstructure:"remote_file"`
+
 	// The remote path where the local shell script will be uploaded to.
 	// This should be set to a writable file that is in a pre-existing directory.
+	// This defaults to remote_folder/remote_file
 	RemotePath string `mapstructure:"remote_path"`
 
 	// The command used to execute the script. The '{{ .Path }}' variable
@@ -56,12 +68,17 @@ type config struct {
 	// This can be set high to allow for reboots.
 	RawStartRetryTimeout string `mapstructure:"start_retry_timeout"`
 
+	// Whether to clean scripts up
+	SkipClean bool `mapstructure:"skip_clean"`
+
+	ExpectDisconnect bool `mapstructure:"expect_disconnect"`
+
 	startRetryTimeout time.Duration
-	tpl               *packer.ConfigTemplate
+	ctx               interpolate.Context
 }
 
 type Provisioner struct {
-	config config
+	config Config
 }
 
 type ExecuteCommandTemplate struct {
@@ -70,19 +87,18 @@ type ExecuteCommandTemplate struct {
 }
 
 func (p *Provisioner) Prepare(raws ...interface{}) error {
-	md, err := common.DecodeConfig(&p.config, raws...)
+	err := config.Decode(&p.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &p.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"execute_command",
+			},
+		},
+	}, raws...)
 	if err != nil {
 		return err
 	}
-
-	p.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return err
-	}
-	p.config.tpl.UserVars = p.config.PackerUserVars
-
-	// Accumulate any errors
-	errs := common.CheckUnusedConfig(md)
 
 	if p.config.ExecuteCommand == "" {
 		p.config.ExecuteCommand = "chmod +x {{.Path}}; {{.Vars}} {{.Path}}"
@@ -93,15 +109,24 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	if p.config.InlineShebang == "" {
-		p.config.InlineShebang = "/bin/sh"
+		p.config.InlineShebang = "/bin/sh -e"
 	}
 
 	if p.config.RawStartRetryTimeout == "" {
 		p.config.RawStartRetryTimeout = "5m"
 	}
 
+	if p.config.RemoteFolder == "" {
+		p.config.RemoteFolder = "/tmp"
+	}
+
+	if p.config.RemoteFile == "" {
+		p.config.RemoteFile = fmt.Sprintf("script_%d.sh", rand.Intn(9999))
+	}
+
 	if p.config.RemotePath == "" {
-		p.config.RemotePath = DefaultRemotePath
+		p.config.RemotePath = fmt.Sprintf(
+			"%s/%s", p.config.RemoteFolder, p.config.RemoteFile)
 	}
 
 	if p.config.Scripts == nil {
@@ -112,6 +137,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.Vars = make([]string, 0)
 	}
 
+	var errs *packer.MultiError
 	if p.config.Script != "" && len(p.config.Scripts) > 0 {
 		errs = packer.MultiErrorAppend(errs,
 			errors.New("Only one of script or scripts can be specified."))
@@ -119,39 +145,6 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 
 	if p.config.Script != "" {
 		p.config.Scripts = []string{p.config.Script}
-	}
-
-	templates := map[string]*string{
-		"inline_shebang":      &p.config.InlineShebang,
-		"script":              &p.config.Script,
-		"start_retry_timeout": &p.config.RawStartRetryTimeout,
-		"remote_path":         &p.config.RemotePath,
-	}
-
-	for n, ptr := range templates {
-		var err error
-		*ptr, err = p.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", n, err))
-		}
-	}
-
-	sliceTemplates := map[string][]string{
-		"inline":           p.config.Inline,
-		"scripts":          p.config.Scripts,
-		"environment_vars": p.config.Vars,
-	}
-
-	for n, slice := range sliceTemplates {
-		for i, elem := range slice {
-			var err error
-			slice[i], err = p.config.tpl.Process(elem, nil)
-			if err != nil {
-				errs = packer.MultiErrorAppend(
-					errs, fmt.Errorf("Error processing %s[%d]: %s", n, i, err))
-			}
-		}
 	}
 
 	if len(p.config.Scripts) == 0 && p.config.Inline == nil {
@@ -170,14 +163,11 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	// Do a check for bad environment variables, such as '=foo', 'foobar'
-	for idx, kv := range p.config.Vars {
+	for _, kv := range p.config.Vars {
 		vs := strings.SplitN(kv, "=", 2)
 		if len(vs) != 2 || vs[0] == "" {
 			errs = packer.MultiErrorAppend(errs,
 				fmt.Errorf("Environment variable not in format 'key=value': %s", kv))
-		} else {
-			// Single quote env var values
-			p.config.Vars[idx] = fmt.Sprintf("%s='%s'", vs[0], vs[1])
 		}
 	}
 
@@ -228,11 +218,8 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		tf.Close()
 	}
 
-	// Build our variables up by adding in the build name and builder type
-	envVars := make([]string, len(p.config.Vars)+2)
-	envVars[0] = fmt.Sprintf("PACKER_BUILD_NAME='%s'", p.config.PackerBuildName)
-	envVars[1] = fmt.Sprintf("PACKER_BUILDER_TYPE='%s'", p.config.PackerBuilderType)
-	copy(envVars[2:], p.config.Vars)
+	// Create environment variables to set before executing the command
+	flattenedEnvVars := p.createFlattenedEnvVars()
 
 	for _, path := range scripts {
 		ui.Say(fmt.Sprintf("Provisioning with shell script: %s", path))
@@ -244,14 +231,12 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 		}
 		defer f.Close()
 
-		// Flatten the environment variables
-		flattendVars := strings.Join(envVars, " ")
-
 		// Compile the command
-		command, err := p.config.tpl.Process(p.config.ExecuteCommand, &ExecuteCommandTemplate{
-			Vars: flattendVars,
+		p.config.ctx.Data = &ExecuteCommandTemplate{
+			Vars: flattenedEnvVars,
 			Path: p.config.RemotePath,
-		})
+		}
+		command, err := interpolate.Render(p.config.ExecuteCommand, &p.config.ctx)
 		if err != nil {
 			return fmt.Errorf("Error processing command: %s", err)
 		}
@@ -277,11 +262,11 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 			}
 
 			cmd = &packer.RemoteCmd{
-				Command: fmt.Sprintf("chmod 0777 %s", p.config.RemotePath),
+				Command: fmt.Sprintf("chmod 0755 %s", p.config.RemotePath),
 			}
 			if err := comm.Start(cmd); err != nil {
 				return fmt.Errorf(
-					"Error chmodding script file to 0777 in remote "+
+					"Error chmodding script file to 0755 in remote "+
 						"machine: %s", err)
 			}
 			cmd.Wait()
@@ -289,15 +274,54 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 			cmd = &packer.RemoteCmd{Command: command}
 			return cmd.StartWithUi(comm, ui)
 		})
+
 		if err != nil {
 			return err
 		}
 
-		// Close the original file since we copied it
-		f.Close()
-
-		if cmd.ExitStatus != 0 {
+		// If the exit code indicates a remote disconnect, fail unless
+		// we were expecting it.
+		if cmd.ExitStatus == packer.CmdDisconnect {
+			if !p.config.ExpectDisconnect {
+				return fmt.Errorf("Script disconnected unexpectedly. " +
+					"If you expected your script to disconnect, i.e. from a " +
+					"restart, you can try adding `\"expect_disconnect\": true` " +
+					"to the shell provisioner parameters.")
+			}
+		} else if cmd.ExitStatus != 0 {
 			return fmt.Errorf("Script exited with non-zero exit status: %d", cmd.ExitStatus)
+		}
+
+		if !p.config.SkipClean {
+
+			// Delete the temporary file we created. We retry this a few times
+			// since if the above rebooted we have to wait until the reboot
+			// completes.
+			err = p.retryable(func() error {
+				cmd = &packer.RemoteCmd{
+					Command: fmt.Sprintf("rm -f %s", p.config.RemotePath),
+				}
+				if err := comm.Start(cmd); err != nil {
+					return fmt.Errorf(
+						"Error removing temporary script at %s: %s",
+						p.config.RemotePath, err)
+				}
+				cmd.Wait()
+				// treat disconnects as retryable by returning an error
+				if cmd.ExitStatus == packer.CmdDisconnect {
+					return fmt.Errorf("Disconnect while removing temporary script.")
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			if cmd.ExitStatus != 0 {
+				return fmt.Errorf(
+					"Error removing temporary script at %s!",
+					p.config.RemotePath)
+			}
 		}
 	}
 
@@ -322,7 +346,7 @@ func (p *Provisioner) retryable(f func() error) error {
 
 		// Create an error and log it
 		err = fmt.Errorf("Retryable error: %s", err)
-		log.Printf(err.Error())
+		log.Print(err.Error())
 
 		// Check if we timed out, otherwise we retry. It is safe to
 		// retry since the only error case above is if the command
@@ -334,4 +358,38 @@ func (p *Provisioner) retryable(f func() error) error {
 			time.Sleep(2 * time.Second)
 		}
 	}
+}
+
+func (p *Provisioner) createFlattenedEnvVars() (flattened string) {
+	flattened = ""
+	envVars := make(map[string]string)
+
+	// Always available Packer provided env vars
+	envVars["PACKER_BUILD_NAME"] = fmt.Sprintf("%s", p.config.PackerBuildName)
+	envVars["PACKER_BUILDER_TYPE"] = fmt.Sprintf("%s", p.config.PackerBuilderType)
+	httpAddr := common.GetHTTPAddr()
+	if httpAddr != "" {
+		envVars["PACKER_HTTP_ADDR"] = fmt.Sprintf("%s", httpAddr)
+	}
+
+	// Split vars into key/value components
+	for _, envVar := range p.config.Vars {
+		keyValue := strings.SplitN(envVar, "=", 2)
+		// Store pair, replacing any single quotes in value so they parse
+		// correctly with required environment variable format
+		envVars[keyValue[0]] = strings.Replace(keyValue[1], "'", `'"'"'`, -1)
+	}
+
+	// Create a list of env var keys in sorted order
+	var keys []string
+	for k := range envVars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Re-assemble vars surrounding value with single quotes and flatten
+	for _, key := range keys {
+		flattened += fmt.Sprintf("%s='%s' ", key, envVars[key])
+	}
+	return
 }

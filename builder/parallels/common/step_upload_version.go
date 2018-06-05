@@ -2,19 +2,27 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
-// This step uploads a file containing the Parallels version, which
-// can be useful for various provisioning reasons.
+// StepUploadVersion is a step that uploads a file containing the version of
+// Parallels Desktop, which can be useful for various provisioning reasons.
+//
+// Uses:
+//   communicator packer.Communicator
+//   driver Driver
+//   ui packer.Ui
 type StepUploadVersion struct {
 	Path string
 }
 
-func (s *StepUploadVersion) Run(state multistep.StateBag) multistep.StepAction {
+// Run uploads a file containing the version of Parallels Desktop.
+func (s *StepUploadVersion) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	comm := state.Get("communicator").(packer.Communicator)
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
@@ -41,4 +49,5 @@ func (s *StepUploadVersion) Run(state multistep.StateBag) multistep.StepAction {
 	return multistep.ActionContinue
 }
 
+// Cleanup does nothing.
 func (s *StepUploadVersion) Cleanup(state multistep.StateBag) {}

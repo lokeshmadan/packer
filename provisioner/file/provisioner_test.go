@@ -1,11 +1,13 @@
 package file
 
 import (
-	"github.com/mitchellh/packer/packer"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/packer/packer"
 )
 
 func testConfig() map[string]interface{} {
@@ -43,6 +45,12 @@ func TestProvisionerPrepare_InvalidSource(t *testing.T) {
 	if err == nil {
 		t.Fatalf("should require existing file")
 	}
+
+	config["generated"] = false
+	err = p.Prepare(config)
+	if err == nil {
+		t.Fatalf("should required existing file")
+	}
 }
 
 func TestProvisionerPrepare_ValidSource(t *testing.T) {
@@ -56,10 +64,27 @@ func TestProvisionerPrepare_ValidSource(t *testing.T) {
 
 	config := testConfig()
 	config["source"] = tf.Name()
-
 	err = p.Prepare(config)
 	if err != nil {
 		t.Fatalf("should allow valid file: %s", err)
+	}
+
+	config["generated"] = false
+	err = p.Prepare(config)
+	if err != nil {
+		t.Fatalf("should allow valid file: %s", err)
+	}
+}
+
+func TestProvisionerPrepare_GeneratedSource(t *testing.T) {
+	var p Provisioner
+
+	config := testConfig()
+	config["source"] = "/this/should/not/exist"
+	config["generated"] = true
+	err := p.Prepare(config)
+	if err != nil {
+		t.Fatalf("should allow non-existing file: %s", err)
 	}
 }
 
@@ -137,5 +162,62 @@ func TestProvisionerProvision_SendsFile(t *testing.T) {
 
 	if comm.UploadData != "hello" {
 		t.Fatalf("should upload with source file's data")
+	}
+}
+
+func TestProvisionDownloadMkdirAll(t *testing.T) {
+	tests := []struct {
+		path string
+	}{
+		{"dir"},
+		{"dir/"},
+		{"dir/subdir"},
+		{"dir/subdir/"},
+		{"path/to/dir"},
+		{"path/to/dir/"},
+	}
+	tmpDir, err := ioutil.TempDir("", "packer-file")
+	if err != nil {
+		t.Fatalf("error tempdir: %s", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	tf, err := ioutil.TempFile(tmpDir, "packer")
+	if err != nil {
+		t.Fatalf("error tempfile: %s", err)
+	}
+	defer os.Remove(tf.Name())
+
+	config := map[string]interface{}{
+		"source": tf.Name(),
+	}
+	var p Provisioner
+	for _, test := range tests {
+		path := filepath.Join(tmpDir, test.path)
+		config["destination"] = filepath.Join(path, "something")
+		if err := p.Prepare(config); err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		ui := &stubUi{}
+		comm := &packer.MockCommunicator{}
+		err = p.ProvisionDownload(ui, comm)
+		if err != nil {
+			t.Fatalf("should successfully provision: %s", err)
+		}
+
+		if !strings.Contains(ui.sayMessages, tf.Name()) {
+			t.Fatalf("should print source filename")
+		}
+
+		if !strings.Contains(ui.sayMessages, "something") {
+			t.Fatalf("should print destination filename")
+		}
+
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("stat of download dir should not error: %s", err)
+		}
+
+		if _, err := os.Stat(config["destination"].(string)); err != nil {
+			t.Fatalf("stat of destination file should not error: %s", err)
+		}
 	}
 }

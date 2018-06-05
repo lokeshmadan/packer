@@ -1,12 +1,13 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // StepOutputDir sets up the output directory by creating it if it does
@@ -18,7 +19,7 @@ type StepOutputDir struct {
 	success bool
 }
 
-func (s *StepOutputDir) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepOutputDir) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	dir := state.Get("dir").(OutputDir)
 	ui := state.Get("ui").(packer.Ui)
 
@@ -60,15 +61,18 @@ func (s *StepOutputDir) Cleanup(state multistep.StateBag) {
 		dir := state.Get("dir").(OutputDir)
 		ui := state.Get("ui").(packer.Ui)
 
-		ui.Say("Deleting output directory...")
-		for i := 0; i < 5; i++ {
-			err := dir.RemoveAll()
-			if err == nil {
-				break
-			}
+		exists, _ := dir.DirExists()
+		if exists {
+			ui.Say("Deleting output directory...")
+			for i := 0; i < 5; i++ {
+				err := dir.RemoveAll()
+				if err == nil {
+					break
+				}
 
-			log.Printf("Error removing output dir: %s", err)
-			time.Sleep(2 * time.Second)
+				log.Printf("Error removing output dir: %s", err)
+				time.Sleep(2 * time.Second)
+			}
 		}
 	}
 }

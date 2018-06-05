@@ -1,29 +1,32 @@
 package ebs
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/goamz/ec2"
-	"github.com/mitchellh/multistep"
-	awscommon "github.com/mitchellh/packer/builder/amazon/common"
-	"github.com/mitchellh/packer/packer"
+	"log"
+
+	"github.com/aws/aws-sdk-go/service/ec2"
+	awscommon "github.com/hashicorp/packer/builder/amazon/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 type stepCreateAMI struct {
 	image *ec2.Image
 }
 
-func (s *stepCreateAMI) Run(state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(config)
+func (s *stepCreateAMI) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(Config)
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	instance := state.Get("instance").(*ec2.Instance)
 	ui := state.Get("ui").(packer.Ui)
 
 	// Create the image
 	ui.Say(fmt.Sprintf("Creating the AMI: %s", config.AMIName))
-	createOpts := &ec2.CreateImage{
-		InstanceId:   instance.InstanceId,
-		Name:         config.AMIName,
-		BlockDevices: config.BlockDevices.BuildAMIDevices(),
+	createOpts := &ec2.CreateImageInput{
+		InstanceId:          instance.InstanceId,
+		Name:                &config.AMIName,
+		BlockDeviceMappings: config.BlockDevices.BuildAMIDevices(),
 	}
 
 	createResp, err := ec2conn.CreateImage(createOpts)
@@ -35,35 +38,53 @@ func (s *stepCreateAMI) Run(state multistep.StateBag) multistep.StepAction {
 	}
 
 	// Set the AMI ID in the state
-	ui.Message(fmt.Sprintf("AMI: %s", createResp.ImageId))
+	ui.Message(fmt.Sprintf("AMI: %s", *createResp.ImageId))
 	amis := make(map[string]string)
-	amis[ec2conn.Region.Name] = createResp.ImageId
+	amis[*ec2conn.Config.Region] = *createResp.ImageId
 	state.Put("amis", amis)
 
 	// Wait for the image to become ready
 	stateChange := awscommon.StateChangeConf{
 		Pending:   []string{"pending"},
 		Target:    "available",
-		Refresh:   awscommon.AMIStateRefreshFunc(ec2conn, createResp.ImageId),
+		Refresh:   awscommon.AMIStateRefreshFunc(ec2conn, *createResp.ImageId),
 		StepState: state,
 	}
 
 	ui.Say("Waiting for AMI to become ready...")
 	if _, err := awscommon.WaitForState(&stateChange); err != nil {
-		err := fmt.Errorf("Error waiting for AMI: %s", err)
+		log.Printf("Error waiting for AMI: %s", err)
+		imagesResp, err := ec2conn.DescribeImages(&ec2.DescribeImagesInput{ImageIds: []*string{createResp.ImageId}})
+		if err != nil {
+			log.Printf("Unable to determine reason waiting for AMI failed: %s", err)
+			err = fmt.Errorf("Unknown error waiting for AMI.")
+		} else {
+			stateReason := imagesResp.Images[0].StateReason
+			err = fmt.Errorf("Error waiting for AMI. Reason: %s", stateReason)
+		}
+
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
 
-	imagesResp, err := ec2conn.Images([]string{createResp.ImageId}, nil)
+	imagesResp, err := ec2conn.DescribeImages(&ec2.DescribeImagesInput{ImageIds: []*string{createResp.ImageId}})
 	if err != nil {
 		err := fmt.Errorf("Error searching for AMI: %s", err)
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
-	s.image = &imagesResp.Images[0]
+	s.image = imagesResp.Images[0]
+
+	snapshots := make(map[string][]string)
+	for _, blockDeviceMapping := range imagesResp.Images[0].BlockDeviceMappings {
+		if blockDeviceMapping.Ebs != nil && blockDeviceMapping.Ebs.SnapshotId != nil {
+
+			snapshots[*ec2conn.Config.Region] = append(snapshots[*ec2conn.Config.Region], *blockDeviceMapping.Ebs.SnapshotId)
+		}
+	}
+	state.Put("snapshots", snapshots)
 
 	return multistep.ActionContinue
 }
@@ -82,12 +103,10 @@ func (s *stepCreateAMI) Cleanup(state multistep.StateBag) {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	ui := state.Get("ui").(packer.Ui)
 
-	ui.Say("Deregistering the AMI because cancelation or error...")
-	if resp, err := ec2conn.DeregisterImage(s.image.Id); err != nil {
+	ui.Say("Deregistering the AMI because cancellation or error...")
+	deregisterOpts := &ec2.DeregisterImageInput{ImageId: s.image.ImageId}
+	if _, err := ec2conn.DeregisterImage(deregisterOpts); err != nil {
 		ui.Error(fmt.Sprintf("Error deregistering AMI, may still be around: %s", err))
-		return
-	} else if resp.Return == false {
-		ui.Error(fmt.Sprintf("Error deregistering AMI, may still be around: %t", resp.Return))
 		return
 	}
 }

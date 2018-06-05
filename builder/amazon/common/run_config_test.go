@@ -3,7 +3,10 @@ package common
 import (
 	"io/ioutil"
 	"os"
+	"regexp"
 	"testing"
+
+	"github.com/hashicorp/packer/helper/communicator"
 )
 
 func init() {
@@ -19,8 +22,18 @@ func testConfig() *RunConfig {
 	return &RunConfig{
 		SourceAmi:    "abcd",
 		InstanceType: "m1.small",
-		SSHUsername:  "root",
+
+		Comm: communicator.Config{
+			SSHUsername: "foo",
+		},
 	}
+}
+
+func testConfigFilter() *RunConfig {
+	config := testConfig()
+	config.SourceAmi = ""
+	config.SourceAmiFilter = AmiFilterOptions{}
+	return config
 }
 
 func TestRunConfigPrepare(t *testing.T) {
@@ -35,7 +48,7 @@ func TestRunConfigPrepare_InstanceType(t *testing.T) {
 	c := testConfig()
 	c.InstanceType = ""
 	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
+		t.Fatalf("Should error if an instance_type is not specified")
 	}
 }
 
@@ -43,7 +56,61 @@ func TestRunConfigPrepare_SourceAmi(t *testing.T) {
 	c := testConfig()
 	c.SourceAmi = ""
 	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("Should error if a source_ami (or source_ami_filter) is not specified")
+	}
+}
+
+func TestRunConfigPrepare_SourceAmiFilterBlank(t *testing.T) {
+	c := testConfigFilter()
+	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("Should error if source_ami_filter is empty or not specified (and source_ami is not specified)")
+	}
+}
+
+func TestRunConfigPrepare_SourceAmiFilterGood(t *testing.T) {
+	c := testConfigFilter()
+	owner := "123"
+	filter_key := "name"
+	filter_value := "foo"
+	goodFilter := AmiFilterOptions{Owners: []*string{&owner}, Filters: map[*string]*string{&filter_key: &filter_value}}
+	c.SourceAmiFilter = goodFilter
+	if err := c.Prepare(nil); len(err) != 0 {
 		t.Fatalf("err: %s", err)
+	}
+}
+
+func TestRunConfigPrepare_EnableT2UnlimitedGood(t *testing.T) {
+	c := testConfig()
+	// Must have a T2 instance type if T2 Unlimited is enabled
+	c.InstanceType = "t2.micro"
+	c.EnableT2Unlimited = true
+	err := c.Prepare(nil)
+	if len(err) > 0 {
+		t.Fatalf("err: %s", err)
+	}
+}
+
+func TestRunConfigPrepare_EnableT2UnlimitedBadInstanceType(t *testing.T) {
+	c := testConfig()
+	// T2 Unlimited cannot be used with instance types other than T2
+	c.InstanceType = "m5.large"
+	c.EnableT2Unlimited = true
+	err := c.Prepare(nil)
+	if len(err) != 1 {
+		t.Fatalf("Should error if T2 Unlimited is enabled with non-T2 instance_type")
+	}
+}
+
+func TestRunConfigPrepare_EnableT2UnlimitedBadWithSpotInstanceRequest(t *testing.T) {
+	c := testConfig()
+	// T2 Unlimited cannot be used with Spot Instances
+	c.InstanceType = "t2.micro"
+	c.EnableT2Unlimited = true
+	c.SpotPrice = "auto"
+	c.SpotPriceAutoProduct = "Linux/UNIX"
+	err := c.Prepare(nil)
+	if len(err) != 1 {
+		t.Fatalf("Should error if T2 Unlimited has been used in conjuntion with a Spot Price request")
 	}
 }
 
@@ -51,54 +118,39 @@ func TestRunConfigPrepare_SpotAuto(t *testing.T) {
 	c := testConfig()
 	c.SpotPrice = "auto"
 	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
+		t.Fatalf("Should error if spot_price_auto_product is not set and spot_price is set to auto")
 	}
 
+	// Good - SpotPrice and SpotPriceAutoProduct are correctly set
 	c.SpotPriceAutoProduct = "foo"
 	if err := c.Prepare(nil); len(err) != 0 {
 		t.Fatalf("err: %s", err)
+	}
+
+	c.SpotPrice = ""
+	if err := c.Prepare(nil); len(err) != 1 {
+		t.Fatalf("Should error if spot_price is not set to auto and spot_price_auto_product is set")
 	}
 }
 
 func TestRunConfigPrepare_SSHPort(t *testing.T) {
 	c := testConfig()
-	c.SSHPort = 0
+	c.Comm.SSHPort = 0
 	if err := c.Prepare(nil); len(err) != 0 {
 		t.Fatalf("err: %s", err)
 	}
 
-	if c.SSHPort != 22 {
-		t.Fatalf("invalid value: %d", c.SSHPort)
+	if c.Comm.SSHPort != 22 {
+		t.Fatalf("invalid value: %d", c.Comm.SSHPort)
 	}
 
-	c.SSHPort = 44
+	c.Comm.SSHPort = 44
 	if err := c.Prepare(nil); len(err) != 0 {
 		t.Fatalf("err: %s", err)
 	}
 
-	if c.SSHPort != 44 {
-		t.Fatalf("invalid value: %d", c.SSHPort)
-	}
-}
-
-func TestRunConfigPrepare_SSHTimeout(t *testing.T) {
-	c := testConfig()
-	c.RawSSHTimeout = ""
-	if err := c.Prepare(nil); len(err) != 0 {
-		t.Fatalf("err: %s", err)
-	}
-
-	c.RawSSHTimeout = "bad"
-	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
-	}
-}
-
-func TestRunConfigPrepare_SSHUsername(t *testing.T) {
-	c := testConfig()
-	c.SSHUsername = ""
-	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
+	if c.Comm.SSHPort != 44 {
+		t.Fatalf("invalid value: %d", c.Comm.SSHPort)
 	}
 }
 
@@ -108,12 +160,13 @@ func TestRunConfigPrepare_UserData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
+	defer os.Remove(tf.Name())
 	defer tf.Close()
 
 	c.UserData = "foo"
 	c.UserDataFile = tf.Name()
 	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
+		t.Fatalf("Should error if user_data string and user_data_file have both been specified")
 	}
 }
 
@@ -125,13 +178,14 @@ func TestRunConfigPrepare_UserDataFile(t *testing.T) {
 
 	c.UserDataFile = "idontexistidontthink"
 	if err := c.Prepare(nil); len(err) != 1 {
-		t.Fatalf("err: %s", err)
+		t.Fatalf("Should error if the file specified by user_data_file does not exist")
 	}
 
 	tf, err := ioutil.TempFile("", "packer")
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
+	defer os.Remove(tf.Name())
 	defer tf.Close()
 
 	c.UserDataFile = tf.Name()
@@ -148,6 +202,21 @@ func TestRunConfigPrepare_TemporaryKeyPairName(t *testing.T) {
 	}
 
 	if c.TemporaryKeyPairName == "" {
-		t.Fatal("keypair empty")
+		t.Fatal("keypair name is empty")
+	}
+
+	// Match prefix and UUID, e.g. "packer_5790d491-a0b8-c84c-c9d2-2aea55086550".
+	r := regexp.MustCompile(`\Apacker_(?:(?i)[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}?)\z`)
+	if !r.MatchString(c.TemporaryKeyPairName) {
+		t.Fatal("keypair name is not valid")
+	}
+
+	c.TemporaryKeyPairName = "ssh-key-123"
+	if err := c.Prepare(nil); len(err) != 0 {
+		t.Fatalf("err: %s", err)
+	}
+
+	if c.TemporaryKeyPairName != "ssh-key-123" {
+		t.Fatal("keypair name does not match")
 	}
 }

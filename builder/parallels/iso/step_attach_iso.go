@@ -1,18 +1,20 @@
 package iso
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	parallelscommon "github.com/mitchellh/packer/builder/parallels/common"
-	"github.com/mitchellh/packer/packer"
 	"log"
+
+	parallelscommon "github.com/hashicorp/packer/builder/parallels/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step attaches the ISO to the virtual machine.
 //
 // Uses:
 //   driver Driver
-//   isoPath string
+//   iso_path string
 //   ui packer.Ui
 //   vmName string
 //
@@ -20,7 +22,7 @@ import (
 //	 attachedIso bool
 type stepAttachISO struct{}
 
-func (s *stepAttachISO) Run(state multistep.StateBag) multistep.StepAction {
+func (s *stepAttachISO) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(parallelscommon.Driver)
 	isoPath := state.Get("iso_path").(string)
 	ui := state.Get("ui").(packer.Ui)

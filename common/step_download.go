@@ -1,13 +1,16 @@
 package common
 
 import (
+	"context"
+	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/helper/useragent"
+	"github.com/hashicorp/packer/packer"
 )
 
 // StepDownload downloads a remote file using the download client within
@@ -36,9 +39,15 @@ type StepDownload struct {
 
 	// A list of URLs to attempt to download this thing.
 	Url []string
+
+	// Extension is the extension to force for the file that is downloaded.
+	// Some systems require a certain extension. If this isn't set, the
+	// extension on the URL is used. Otherwise, this will be forced
+	// on the downloaded file for every URL.
+	Extension string
 }
 
-func (s *StepDownload) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepDownload) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	cache := state.Get("cache").(packer.Cache)
 	ui := state.Get("ui").(packer.Ui)
 
@@ -54,15 +63,27 @@ func (s *StepDownload) Run(state multistep.StateBag) multistep.StepAction {
 
 	ui.Say(fmt.Sprintf("Downloading or copying %s", s.Description))
 
-	var finalPath string
-	for _, url := range s.Url {
-		ui.Message(fmt.Sprintf("Downloading or copying: %s", url))
+	// First try to use any already downloaded file
+	// If it fails, proceed to regular download logic
 
+	var downloadConfigs = make([]*DownloadConfig, len(s.Url))
+	var finalPath string
+	for i, url := range s.Url {
 		targetPath := s.TargetPath
 		if targetPath == "" {
+			// Determine a cache key. This is normally just the URL but
+			// if we force a certain extension we hash the URL and add
+			// the extension to force it.
+			cacheKey := url
+			if s.Extension != "" {
+				hash := sha1.Sum([]byte(url))
+				cacheKey = fmt.Sprintf(
+					"%s.%s", hex.EncodeToString(hash[:]), s.Extension)
+			}
+
 			log.Printf("Acquiring lock to download: %s", url)
-			targetPath = cache.Lock(url)
-			defer cache.Unlock(url)
+			targetPath = cache.Lock(cacheKey)
+			defer cache.Unlock(cacheKey)
 		}
 
 		config := &DownloadConfig{
@@ -71,21 +92,36 @@ func (s *StepDownload) Run(state multistep.StateBag) multistep.StepAction {
 			CopyFile:   false,
 			Hash:       HashForType(s.ChecksumType),
 			Checksum:   checksum,
-			UserAgent:  "Packer",
+			UserAgent:  useragent.String(),
 		}
+		downloadConfigs[i] = config
 
-		path, err, retry := s.download(config, state)
-		if err != nil {
-			ui.Message(fmt.Sprintf("Error downloading: %s", err))
-		}
-
-		if !retry {
-			return multistep.ActionHalt
-		}
-
-		if err == nil {
-			finalPath = path
+		if match, _ := NewDownloadClient(config).VerifyChecksum(config.TargetPath); match {
+			ui.Message(fmt.Sprintf("Found already downloaded, initial checksum matched, no download needed: %s", url))
+			finalPath = config.TargetPath
 			break
+		}
+	}
+
+	if finalPath == "" {
+		for i, url := range s.Url {
+			ui.Message(fmt.Sprintf("Downloading or copying: %s", url))
+
+			config := downloadConfigs[i]
+
+			path, err, retry := s.download(config, state)
+			if err != nil {
+				ui.Message(fmt.Sprintf("Error downloading: %s", err))
+			}
+
+			if !retry {
+				return multistep.ActionHalt
+			}
+
+			if err == nil {
+				finalPath = path
+				break
+			}
 		}
 	}
 

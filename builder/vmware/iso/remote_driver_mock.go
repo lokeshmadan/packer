@@ -1,7 +1,7 @@
 package iso
 
 import (
-	vmwcommon "github.com/mitchellh/packer/builder/vmware/common"
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
 )
 
 type RemoteDriverMock struct {
@@ -19,6 +19,13 @@ type RemoteDriverMock struct {
 	UnregisterCalled bool
 	UnregisterPath   string
 	UnregisterErr    error
+
+	DestroyCalled bool
+	DestroyErr    error
+
+	IsDestroyedCalled bool
+	IsDestroyedResult bool
+	IsDestroyedErr    error
 
 	uploadErr error
 
@@ -43,8 +50,22 @@ func (d *RemoteDriverMock) Unregister(path string) error {
 	return d.UnregisterErr
 }
 
+func (d *RemoteDriverMock) Destroy() error {
+	d.DestroyCalled = true
+	return d.DestroyErr
+}
+
+func (d *RemoteDriverMock) IsDestroyed() (bool, error) {
+	d.DestroyCalled = true
+	return d.IsDestroyedResult, d.IsDestroyedErr
+}
+
 func (d *RemoteDriverMock) upload(dst, src string) error {
 	return d.uploadErr
+}
+
+func (d *RemoteDriverMock) RemoveCache(localPath string) error {
+	return nil
 }
 
 func (d *RemoteDriverMock) ReloadVM() error {

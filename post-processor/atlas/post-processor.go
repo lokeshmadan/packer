@@ -8,12 +8,17 @@ import (
 
 	"github.com/hashicorp/atlas-go/archive"
 	"github.com/hashicorp/atlas-go/v1"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 	"github.com/mitchellh/mapstructure"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
 )
 
-const BuildEnvKey = "ATLAS_BUILD_ID"
+const (
+	BuildEnvKey   = "ATLAS_BUILD_ID"
+	CompileEnvKey = "ATLAS_COMPILE_ID"
+)
 
 // Artifacts can return a string for this state key and the post-processor
 // will use automatically use this as the type. The user's value overrides
@@ -33,15 +38,16 @@ type Config struct {
 	TypeOverride bool   `mapstructure:"artifact_type_override"`
 	Metadata     map[string]string
 
-	ServerAddr string `mapstructure:"server_address"`
+	ServerAddr string `mapstructure:"atlas_url"`
 	Token      string
 
 	// This shouldn't ever be set outside of unit tests.
 	Test bool `mapstructure:"test"`
 
-	tpl        *packer.ConfigTemplate
+	ctx        interpolate.Context
 	user, name string
 	buildId    int
+	compileId  int
 }
 
 type PostProcessor struct {
@@ -50,31 +56,15 @@ type PostProcessor struct {
 }
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
-	_, err := common.DecodeConfig(&p.config, raws...)
+	err := config.Decode(&p.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &p.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{},
+		},
+	}, raws...)
 	if err != nil {
 		return err
-	}
-
-	p.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return err
-	}
-	p.config.tpl.UserVars = p.config.PackerUserVars
-
-	templates := map[string]*string{
-		"artifact":       &p.config.Artifact,
-		"type":           &p.config.Type,
-		"server_address": &p.config.ServerAddr,
-		"token":          &p.config.Token,
-	}
-
-	errs := new(packer.MultiError)
-	for key, ptr := range templates {
-		*ptr, err = p.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", key, err))
-		}
 	}
 
 	required := map[string]*string{
@@ -82,6 +72,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		"artifact_type": &p.config.Type,
 	}
 
+	var errs *packer.MultiError
 	for key, ptr := range required {
 		if *ptr == "" {
 			errs = packer.MultiErrorAppend(
@@ -89,7 +80,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		}
 	}
 
-	if len(errs.Errors) > 0 {
+	if errs != nil && len(errs.Errors) > 0 {
 		return errs
 	}
 
@@ -107,6 +98,17 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		}
 
 		p.config.buildId = int(raw)
+	}
+
+	// If we have a compile ID, save it
+	if v := os.Getenv(CompileEnvKey); v != "" {
+		raw, err := strconv.ParseInt(v, 0, 0)
+		if err != nil {
+			return fmt.Errorf(
+				"Error parsing compile ID: %s", err)
+		}
+
+		p.config.compileId = int(raw)
 	}
 
 	// Build the client
@@ -136,11 +138,29 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 			return errs
 		}
 	}
-
 	return nil
 }
 
 func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+	// todo: remove/reword after the migration
+	if p.config.Type == "vagrant.box" {
+		return nil, false, fmt.Errorf("Vagrant-related functionality has been removed from Terraform\n" +
+			"Enterprise into its own product, Vagrant Cloud. For more information see\n" +
+			"https://www.vagrantup.com/docs/vagrant-cloud/vagrant-cloud-migration.html\n" +
+			"Please replace the Atlas post-processor with the Vagrant Cloud post-processor,\n" +
+			"and see https://www.packer.io/docs/post-processors/vagrant-cloud.html for\n" +
+			"more detail.\n")
+	}
+
+	ui.Message("\n-----------------------------------------------------------------------\n" +
+		"Deprecation warning: The Packer and Artifact Registry features of Atlas\n" +
+		"will no longer be actively developed or maintained and will be fully\n" +
+		"decommissioned. Please see our guide on building immutable\n" +
+		"infrastructure with Packer on CI/CD for ideas on implementing\n" +
+		"these features yourself: https://www.packer.io/guides/packer-on-cicd/\n" +
+		"-----------------------------------------------------------------------\n",
+	)
+
 	if _, err := p.client.Artifact(p.config.user, p.config.name); err != nil {
 		if err != atlas.ErrNotFound {
 			return nil, false, fmt.Errorf(
@@ -157,12 +177,13 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	}
 
 	opts := &atlas.UploadArtifactOpts{
-		User:     p.config.user,
-		Name:     p.config.name,
-		Type:     p.config.Type,
-		ID:       artifact.Id(),
-		Metadata: p.metadata(artifact),
-		BuildID:  p.config.buildId,
+		User:      p.config.user,
+		Name:      p.config.name,
+		Type:      p.config.Type,
+		ID:        artifact.Id(),
+		Metadata:  p.metadata(artifact),
+		BuildID:   p.config.buildId,
+		CompileID: p.config.compileId,
 	}
 
 	if fs := artifact.Files(); len(fs) > 0 {
@@ -178,12 +199,12 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 			path = longestCommonPrefix(fs)
 			if path == "" {
 				return nil, false, fmt.Errorf(
-					"No common prefix for achiving files: %v", fs)
+					"No common prefix for archiving files: %v", fs)
 			}
 
 			// Modify the archive options to only include the files
 			// that are in our file list.
-			include := make([]string, 0, len(fs))
+			include := make([]string, len(fs))
 			for i, f := range fs {
 				include[i] = strings.Replace(f, path, "", 1)
 			}
@@ -201,7 +222,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		opts.FileSize = r.Size
 	}
 
-	ui.Message("Uploading artifact version...")
+	ui.Message(fmt.Sprintf("Uploading artifact (%d bytes)", opts.FileSize))
 	var av *atlas.ArtifactVersion
 	doneCh := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -217,7 +238,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 
 	select {
 	case err := <-errCh:
-		return nil, false, fmt.Errorf("Error uploading: %s", err)
+		return nil, false, fmt.Errorf("Error uploading (%d bytes): %s", opts.FileSize, err)
 	case <-doneCh:
 	}
 

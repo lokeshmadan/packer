@@ -1,12 +1,18 @@
 package packer
 
 import (
-	"github.com/mitchellh/iochan"
 	"io"
 	"os"
 	"strings"
 	"sync"
+	"unicode"
+
+	"github.com/mitchellh/iochan"
 )
+
+// CmdDisconnect is a sentinel value to indicate a RemoteCmd
+// exited because the remote side disconnected us.
+const CmdDisconnect int = 2300218
 
 // RemoteCmd represents a remote command being prepared or run.
 type RemoteCmd struct {
@@ -74,6 +80,8 @@ type Communicator interface {
 	// with the contents writing to the given writer. This method will
 	// block until it completes.
 	Download(string, io.Writer) error
+
+	DownloadDir(src string, dst string, exclude []string) error
 }
 
 // StartWithUi runs the remote command and streams the output to any
@@ -115,16 +123,16 @@ func (r *RemoteCmd) StartWithUi(c Communicator, ui Ui) error {
 	}
 
 	// Create the channels we'll use for data
-	exitCh := make(chan int, 1)
+	exitCh := make(chan struct{})
 	stdoutCh := iochan.DelimReader(stdout_r, '\n')
 	stderrCh := iochan.DelimReader(stderr_r, '\n')
 
 	// Start the goroutine to watch for the exit
 	go func() {
+		defer close(exitCh)
 		defer stdout_w.Close()
 		defer stderr_w.Close()
 		r.Wait()
-		exitCh <- r.ExitStatus
 	}()
 
 	// Loop and get all our output
@@ -132,9 +140,13 @@ OutputLoop:
 	for {
 		select {
 		case output := <-stderrCh:
-			ui.Message(r.cleanOutputLine(output))
+			if output != "" {
+				ui.Message(r.cleanOutputLine(output))
+			}
 		case output := <-stdoutCh:
-			ui.Message(r.cleanOutputLine(output))
+			if output != "" {
+				ui.Message(r.cleanOutputLine(output))
+			}
 		case <-exitCh:
 			break OutputLoop
 		}
@@ -143,11 +155,11 @@ OutputLoop:
 	// Make sure we finish off stdout/stderr because we may have gotten
 	// a message from the exit channel before finishing these first.
 	for output := range stdoutCh {
-		ui.Message(strings.TrimSpace(output))
+		ui.Message(r.cleanOutputLine(output))
 	}
 
 	for output := range stderrCh {
-		ui.Message(strings.TrimSpace(output))
+		ui.Message(r.cleanOutputLine(output))
 	}
 
 	return nil
@@ -185,7 +197,7 @@ func (r *RemoteCmd) Wait() {
 // UI output when we're reading from a remote command.
 func (r *RemoteCmd) cleanOutputLine(line string) string {
 	// Trim surrounding whitespace
-	line = strings.TrimSpace(line)
+	line = strings.TrimRightFunc(line, unicode.IsSpace)
 
 	// Trim up to the first carriage return, since that text would be
 	// lost anyways.

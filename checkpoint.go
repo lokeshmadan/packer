@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/go-checkpoint"
-	"github.com/mitchellh/packer/command"
+	"github.com/hashicorp/packer/command"
+	"github.com/hashicorp/packer/packer"
+	packerVersion "github.com/hashicorp/packer/version"
 )
 
 func init() {
@@ -25,16 +27,16 @@ func runCheckpoint(c *config) {
 		return
 	}
 
-	configDir, err := ConfigDir()
+	configDir, err := packer.ConfigDir()
 	if err != nil {
 		log.Printf("[ERR] Checkpoint setup error: %s", err)
 		checkpointResult <- nil
 		return
 	}
 
-	version := Version
-	if VersionPrerelease != "" {
-		version += fmt.Sprintf("-%s", VersionPrerelease)
+	version := packerVersion.Version
+	if packerVersion.VersionPrerelease != "" {
+		version += fmt.Sprintf("-%s", packerVersion.VersionPrerelease)
 	}
 
 	signaturePath := filepath.Join(configDir, "checkpoint_signature")

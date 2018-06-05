@@ -2,13 +2,17 @@ package chroot
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"github.com/mitchellh/goamz/ec2"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type mountPathData struct {
@@ -21,19 +25,35 @@ type mountPathData struct {
 //   mount_path string - The location where the volume was mounted.
 //   mount_device_cleanup CleanupFunc - To perform early cleanup
 type StepMountDevice struct {
+	MountOptions   []string
+	MountPartition string
+
 	mountPath string
 }
 
-func (s *StepMountDevice) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepMountDevice) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	ui := state.Get("ui").(packer.Ui)
-	image := state.Get("source_image").(*ec2.Image)
 	device := state.Get("device").(string)
+	if config.NVMEDevicePath != "" {
+		// customizable device path for mounting NVME block devices on c5 and m5 HVM
+		device = config.NVMEDevicePath
+	}
 	wrappedCommand := state.Get("wrappedCommand").(CommandWrapper)
 
-	mountPath, err := config.tpl.Process(config.MountPath, &mountPathData{
-		Device: filepath.Base(device),
-	})
+	var virtualizationType string
+	if config.FromScratch {
+		virtualizationType = config.AMIVirtType
+	} else {
+		image := state.Get("source_image").(*ec2.Image)
+		virtualizationType = *image.VirtualizationType
+		log.Printf("Source image virtualization type is: %s", virtualizationType)
+	}
+
+	ctx := config.ctx
+
+	ctx.Data = &mountPathData{Device: filepath.Base(device)}
+	mountPath, err := interpolate.Render(config.MountPath, &ctx)
 
 	if err != nil {
 		err := fmt.Errorf("Error preparing mount directory: %s", err)
@@ -59,24 +79,31 @@ func (s *StepMountDevice) Run(state multistep.StateBag) multistep.StepAction {
 		return multistep.ActionHalt
 	}
 
-	log.Printf("Source image virtualization type is: %s", image.VirtualizationType)
 	deviceMount := device
-	if image.VirtualizationType == "hvm" {
-		deviceMount = fmt.Sprintf("%s%d", device, 1)
+
+	if virtualizationType == "hvm" && s.MountPartition != "0" {
+		deviceMount = fmt.Sprintf("%s%s", device, s.MountPartition)
 	}
 	state.Put("deviceMount", deviceMount)
 
 	ui.Say("Mounting the root device...")
 	stderr := new(bytes.Buffer)
+
+	// build mount options from mount_options config, useful for nouuid options
+	// or other specific device type settings for mount
+	opts := ""
+	if len(s.MountOptions) > 0 {
+		opts = "-o " + strings.Join(s.MountOptions, " -o ")
+	}
 	mountCommand, err := wrappedCommand(
-		fmt.Sprintf("mount %s %s", deviceMount, mountPath))
+		fmt.Sprintf("mount %s %s %s", opts, deviceMount, mountPath))
 	if err != nil {
 		err := fmt.Errorf("Error creating mount command: %s", err)
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
-
+	log.Printf("[DEBUG] (step mount) mount command is %s", mountCommand)
 	cmd := ShellCommand(mountCommand)
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

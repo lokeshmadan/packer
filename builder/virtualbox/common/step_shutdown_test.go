@@ -1,10 +1,12 @@
 package common
 
 import (
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"context"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 func TestStepShutdown_impl(t *testing.T) {
@@ -22,7 +24,7 @@ func TestStepShutdown_noShutdownCommand(t *testing.T) {
 	driver := state.Get("driver").(*DriverMock)
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -59,7 +61,7 @@ func TestStepShutdown_shutdownCommand(t *testing.T) {
 	}()
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -96,10 +98,73 @@ func TestStepShutdown_shutdownTimeout(t *testing.T) {
 	}()
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionHalt {
+	if action := step.Run(context.Background(), state); action != multistep.ActionHalt {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); !ok {
 		t.Fatal("should have error")
 	}
+}
+
+func TestStepShutdown_shutdownDelay(t *testing.T) {
+	state := testState(t)
+	step := new(StepShutdown)
+	step.Command = "poweroff"
+	step.Timeout = 5 * time.Second
+	step.Delay = 2 * time.Second
+
+	comm := new(packer.MockCommunicator)
+	state.Put("communicator", comm)
+	state.Put("vmName", "foo")
+
+	driver := state.Get("driver").(*DriverMock)
+	driver.IsRunningReturn = true
+	start := time.Now()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		driver.Lock()
+		defer driver.Unlock()
+		driver.IsRunningReturn = false
+	}()
+
+	// Test the run
+
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("bad action: %#v", action)
+	}
+	testDuration := time.Since(start).Seconds()
+	if testDuration < 2.5 || testDuration > 2.6 {
+		t.Fatal("incorrect duration")
+	}
+
+	if _, ok := state.GetOk("error"); ok {
+		t.Fatal("should NOT have error")
+	}
+
+	step.Delay = 0
+
+	driver.IsRunningReturn = true
+	start = time.Now()
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		driver.Lock()
+		defer driver.Unlock()
+		driver.IsRunningReturn = false
+	}()
+
+	// Test the run
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("bad action: %#v", action)
+	}
+	testDuration = time.Since(start).Seconds()
+	if testDuration > 0.6 {
+		t.Fatal("incorrect duration")
+	}
+
+	if _, ok := state.GetOk("error"); ok {
+		t.Fatal("should NOT have error")
+	}
+
 }

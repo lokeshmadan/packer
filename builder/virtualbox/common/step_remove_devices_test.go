@@ -1,8 +1,10 @@
 package common
 
 import (
-	"github.com/mitchellh/multistep"
+	"context"
 	"testing"
+
+	"github.com/hashicorp/packer/helper/multistep"
 )
 
 func TestStepRemoveDevices_impl(t *testing.T) {
@@ -18,7 +20,7 @@ func TestStepRemoveDevices(t *testing.T) {
 	driver := state.Get("driver").(*DriverMock)
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -41,7 +43,7 @@ func TestStepRemoveDevices_attachedIso(t *testing.T) {
 	driver := state.Get("driver").(*DriverMock)
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -68,7 +70,7 @@ func TestStepRemoveDevices_attachedIsoOnSata(t *testing.T) {
 	driver := state.Get("driver").(*DriverMock)
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -94,7 +96,7 @@ func TestStepRemoveDevices_floppyPath(t *testing.T) {
 	driver := state.Get("driver").(*DriverMock)
 
 	// Test the run
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 	if _, ok := state.GetOk("error"); ok {
@@ -102,10 +104,13 @@ func TestStepRemoveDevices_floppyPath(t *testing.T) {
 	}
 
 	// Test that both were removed
-	if len(driver.VBoxManageCalls) != 1 {
+	if len(driver.VBoxManageCalls) != 2 {
 		t.Fatalf("bad: %#v", driver.VBoxManageCalls)
 	}
 	if driver.VBoxManageCalls[0][3] != "Floppy Controller" {
+		t.Fatalf("bad: %#v", driver.VBoxManageCalls)
+	}
+	if driver.VBoxManageCalls[1][3] != "Floppy Controller" {
 		t.Fatalf("bad: %#v", driver.VBoxManageCalls)
 	}
 }

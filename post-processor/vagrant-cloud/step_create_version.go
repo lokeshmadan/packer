@@ -1,9 +1,11 @@
 package vagrantcloud
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 type Version struct {
@@ -14,7 +16,7 @@ type Version struct {
 type stepCreateVersion struct {
 }
 
-func (s *stepCreateVersion) Run(state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateVersion) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*VagrantCloudClient)
 	ui := state.Get("ui").(packer.Ui)
 	config := state.Get("config").(Config)
@@ -55,31 +57,4 @@ func (s *stepCreateVersion) Run(state multistep.StateBag) multistep.StepAction {
 	return multistep.ActionContinue
 }
 
-func (s *stepCreateVersion) Cleanup(state multistep.StateBag) {
-	client := state.Get("client").(*VagrantCloudClient)
-	ui := state.Get("ui").(packer.Ui)
-	box := state.Get("box").(*Box)
-	version := state.Get("version").(*Version)
-
-	_, cancelled := state.GetOk(multistep.StateCancelled)
-	_, halted := state.GetOk(multistep.StateHalted)
-
-	// Return if we didn't cancel or halt, and thus need
-	// no cleanup
-	if !cancelled && !halted {
-		return
-	}
-
-	path := fmt.Sprintf("box/%s/version/%v", box.Tag, version.Version)
-
-	ui.Say("Cleaning up version")
-	ui.Message(fmt.Sprintf("Deleting version: %s", version.Version))
-
-	// No need for resp from the cleanup DELETE
-	_, err := client.Delete(path)
-
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error destroying version: %s", err))
-	}
-
-}
+func (s *stepCreateVersion) Cleanup(state multistep.StateBag) {}

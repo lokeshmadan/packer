@@ -1,7 +1,7 @@
 package iso
 
 import (
-	vmwcommon "github.com/mitchellh/packer/builder/vmware/common"
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
 )
 
 type RemoteDriver interface {
@@ -12,11 +12,20 @@ type RemoteDriver interface {
 	// exists.
 	UploadISO(string, string, string) (string, error)
 
+	// RemoveCache deletes localPath from the remote cache.
+	RemoveCache(localPath string) error
+
 	// Adds a VM to inventory specified by the path to the VMX given.
 	Register(string) error
 
 	// Removes a VM from inventory specified by the path to the VMX given.
 	Unregister(string) error
+
+	// Destroys a VM
+	Destroy() error
+
+	// Checks if the VM is destroyed.
+	IsDestroyed() (bool, error)
 
 	// Uploads a local file to remote side.
 	upload(dst, src string) error

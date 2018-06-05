@@ -5,11 +5,20 @@ import "sync"
 type DriverMock struct {
 	sync.Mutex
 
-	DeviceAddCdRomCalled bool
-	DeviceAddCdRomName   string
-	DeviceAddCdRomImage  string
-	DeviceAddCdRomResult string
-	DeviceAddCdRomErr    error
+	CompactDiskCalled bool
+	CompactDiskPath   string
+	CompactDiskErr    error
+
+	DeviceAddCDROMCalled bool
+	DeviceAddCDROMName   string
+	DeviceAddCDROMImage  string
+	DeviceAddCDROMResult string
+	DeviceAddCDROMErr    error
+
+	DiskPathCalled bool
+	DiskPathName   string
+	DiskPathResult string
+	DiskPathErr    error
 
 	ImportCalled  bool
 	ImportName    string
@@ -37,28 +46,43 @@ type DriverMock struct {
 	SendKeyScanCodesCalls [][]string
 	SendKeyScanCodesErrs  []error
 
-	ToolsIsoPathCalled bool
-	ToolsIsoPathFlavor string
-	ToolsIsoPathResult string
-	ToolsIsoPathErr    error
+	SetDefaultConfigurationCalled bool
+	SetDefaultConfigurationError  error
 
-	MacName   string
-	MacReturn string
-	MacError  error
+	ToolsISOPathCalled bool
+	ToolsISOPathFlavor string
+	ToolsISOPathResult string
+	ToolsISOPathErr    error
 
-	IpAddressMac    string
-	IpAddressReturn string
-	IpAddressError  error
+	MACName   string
+	MACReturn string
+	MACError  error
+
+	IPAddressMAC    string
+	IPAddressReturn string
+	IPAddressError  error
 }
 
-func (d *DriverMock) DeviceAddCdRom(name string, image string) (string, error) {
-	d.DeviceAddCdRomCalled = true
-	d.DeviceAddCdRomName = name
-	d.DeviceAddCdRomImage = image
-	return d.DeviceAddCdRomResult, d.DeviceAddCdRomErr
+func (d *DriverMock) CompactDisk(path string) error {
+	d.CompactDiskCalled = true
+	d.CompactDiskPath = path
+	return d.CompactDiskErr
 }
 
-func (d *DriverMock) Import(name, srcPath, dstPath string, reassignMac bool) error {
+func (d *DriverMock) DeviceAddCDROM(name string, image string) (string, error) {
+	d.DeviceAddCDROMCalled = true
+	d.DeviceAddCDROMName = name
+	d.DeviceAddCDROMImage = image
+	return d.DeviceAddCDROMResult, d.DeviceAddCDROMErr
+}
+
+func (d *DriverMock) DiskPath(name string) (string, error) {
+	d.DiskPathCalled = true
+	d.DiskPathName = name
+	return d.DiskPathResult, d.DiskPathErr
+}
+
+func (d *DriverMock) Import(name, srcPath, dstPath string, reassignMAC bool) error {
 	d.ImportCalled = true
 	d.ImportName = name
 	d.ImportSrcPath = srcPath
@@ -107,18 +131,23 @@ func (d *DriverMock) SendKeyScanCodes(name string, scancodes ...string) error {
 	return nil
 }
 
-func (d *DriverMock) Mac(name string) (string, error) {
-	d.MacName = name
-	return d.MacReturn, d.MacError
+func (d *DriverMock) SetDefaultConfiguration(name string) error {
+	d.SetDefaultConfigurationCalled = true
+	return d.SetDefaultConfigurationError
 }
 
-func (d *DriverMock) IpAddress(mac string) (string, error) {
-	d.IpAddressMac = mac
-	return d.IpAddressReturn, d.IpAddressError
+func (d *DriverMock) MAC(name string) (string, error) {
+	d.MACName = name
+	return d.MACReturn, d.MACError
 }
 
-func (d *DriverMock) ToolsIsoPath(flavor string) (string, error) {
-	d.ToolsIsoPathCalled = true
-	d.ToolsIsoPathFlavor = flavor
-	return d.ToolsIsoPathResult, d.ToolsIsoPathErr
+func (d *DriverMock) IPAddress(mac string) (string, error) {
+	d.IPAddressMAC = mac
+	return d.IPAddressReturn, d.IPAddressError
+}
+
+func (d *DriverMock) ToolsISOPath(flavor string) (string, error) {
+	d.ToolsISOPathCalled = true
+	d.ToolsISOPathFlavor = flavor
+	return d.ToolsISOPathResult, d.ToolsISOPathErr
 }

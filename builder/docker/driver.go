@@ -2,6 +2,8 @@ package docker
 
 import (
 	"io"
+
+	"github.com/hashicorp/go-version"
 )
 
 // Driver is the interface that has to be implemented to communicate with
@@ -9,7 +11,7 @@ import (
 // a mock driver can be shimmed in.
 type Driver interface {
 	// Commit the container to a tag
-	Commit(id string) (string, error)
+	Commit(id string, author string, changes []string, message string) (string, error)
 
 	// Delete an image that is imported into Docker
 	DeleteImage(id string) error
@@ -20,9 +22,13 @@ type Driver interface {
 	// Import imports a container from a tar file
 	Import(path, repo string) (string, error)
 
+	// IPAddress returns the address of the container that can be used
+	// for external access.
+	IPAddress(id string) (string, error)
+
 	// Login. This will lock the driver from performing another Login
 	// until Logout is called. Therefore, any users MUST call Logout.
-	Login(repo, email, username, password string) error
+	Login(repo, username, password string) error
 
 	// Logout. This can only be called if Login succeeded.
 	Logout(repo string) error
@@ -44,10 +50,13 @@ type Driver interface {
 	StopContainer(id string) error
 
 	// TagImage tags the image with the given ID
-	TagImage(id string, repo string) error
+	TagImage(id string, repo string, force bool) error
 
 	// Verify verifies that the driver can run
 	Verify() error
+
+	// Version reads the Docker version
+	Version() (*version.Version, error)
 }
 
 // ContainerConfig is the configuration used to start a container.
@@ -55,6 +64,7 @@ type ContainerConfig struct {
 	Image      string
 	RunCommand []string
 	Volumes    map[string]string
+	Privileged bool
 }
 
 // This is the template that is used for the RunCommand in the ContainerConfig.

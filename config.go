@@ -2,19 +2,24 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
-	"github.com/mitchellh/osext"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/packer/plugin"
+	"github.com/hashicorp/packer/command"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/packer/plugin"
+	"github.com/kardianos/osext"
 )
 
-// EnvConfig is the global EnvironmentConfig we use to initialize the CLI.
-var EnvConfig packer.EnvironmentConfig
+// PACKERSPACE is used to represent the spaces that separate args for a command
+// without being confused with spaces in the path to the command itself.
+const PACKERSPACE = "-PACKERSPACE-"
 
 type config struct {
 	DisableCheckpoint          bool `json:"disable_checkpoint"`
@@ -25,19 +30,6 @@ type config struct {
 	Builders       map[string]string
 	PostProcessors map[string]string `json:"post-processors"`
 	Provisioners   map[string]string
-}
-
-// ConfigFile returns the default path to the configuration file. On
-// Unix-like systems this is the ".packerconfig" file in the home directory.
-// On Windows, this is the "packer.config" file in the application data
-// directory.
-func ConfigFile() (string, error) {
-	return configFile()
-}
-
-// ConfigDir returns the configuration directory for Packer.
-func ConfigDir() (string, error) {
-	return configDir()
 }
 
 // Decodes configuration in JSON format from the given io.Reader into
@@ -55,6 +47,12 @@ func decodeConfig(r io.Reader, c *config) error {
 // Hence, the priority order is the reverse of the search order - i.e., the
 // CWD has the highest priority.
 func (c *config) Discover() error {
+	// If we are already inside a plugin process we should not need to
+	// discover anything.
+	if os.Getenv(plugin.MagicCookieKey) == plugin.MagicCookieValue {
+		return nil
+	}
+
 	// First, look in the same directory as the executable.
 	exePath, err := osext.Executable()
 	if err != nil {
@@ -66,7 +64,7 @@ func (c *config) Discover() error {
 	}
 
 	// Next, look in the plugins directory.
-	dir, err := ConfigDir()
+	dir, err := packer.ConfigDir()
 	if err != nil {
 		log.Printf("[ERR] Error loading config directory: %s", err)
 	} else {
@@ -75,8 +73,14 @@ func (c *config) Discover() error {
 		}
 	}
 
-	// Last, look in the CWD.
+	// Next, look in the CWD.
 	if err := c.discover("."); err != nil {
+		return err
+	}
+
+	// Finally, try to use an internal plugin. Note that this will not override
+	// any previously-loaded plugins.
+	if err := c.discoverInternal(); err != nil {
 		return err
 	}
 
@@ -151,13 +155,8 @@ func (c *config) discover(path string) error {
 		return err
 	}
 
-	err = c.discoverSingle(
+	return c.discoverSingle(
 		filepath.Join(path, "packer-provisioner-*"), &c.Provisioners)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (c *config) discoverSingle(glob string, m *map[string]string) error {
@@ -175,6 +174,15 @@ func (c *config) discoverSingle(glob string, m *map[string]string) error {
 	for _, match := range matches {
 		file := filepath.Base(match)
 
+		// One Windows, ignore any plugins that don't end in .exe.
+		// We could do a full PATHEXT parse, but this is probably good enough.
+		if runtime.GOOS == "windows" && strings.ToLower(filepath.Ext(file)) != ".exe" {
+			log.Printf(
+				"[DEBUG] Ignoring plugin match %s, no exe extension",
+				match)
+			continue
+		}
+
 		// If the filename has a ".", trim up to there
 		if idx := strings.Index(file, "."); idx >= 0 {
 			file = file[:idx]
@@ -184,6 +192,46 @@ func (c *config) discoverSingle(glob string, m *map[string]string) error {
 		plugin := file[len(prefix):]
 		log.Printf("[DEBUG] Discovered plugin: %s = %s", plugin, match)
 		(*m)[plugin] = match
+	}
+
+	return nil
+}
+
+func (c *config) discoverInternal() error {
+	// Get the packer binary path
+	packerPath, err := osext.Executable()
+	if err != nil {
+		log.Printf("[ERR] Error loading exe directory: %s", err)
+		return err
+	}
+
+	for builder := range command.Builders {
+		_, found := (c.Builders)[builder]
+		if !found {
+			log.Printf("Using internal plugin for %s", builder)
+			(c.Builders)[builder] = fmt.Sprintf("%s%splugin%spacker-builder-%s",
+				packerPath, PACKERSPACE, PACKERSPACE, builder)
+		}
+	}
+
+	for provisioner := range command.Provisioners {
+		_, found := (c.Provisioners)[provisioner]
+		if !found {
+			log.Printf("Using internal plugin for %s", provisioner)
+			(c.Provisioners)[provisioner] = fmt.Sprintf(
+				"%s%splugin%spacker-provisioner-%s",
+				packerPath, PACKERSPACE, PACKERSPACE, provisioner)
+		}
+	}
+
+	for postProcessor := range command.PostProcessors {
+		_, found := (c.PostProcessors)[postProcessor]
+		if !found {
+			log.Printf("Using internal plugin for %s", postProcessor)
+			(c.PostProcessors)[postProcessor] = fmt.Sprintf(
+				"%s%splugin%spacker-post-processor-%s",
+				packerPath, PACKERSPACE, PACKERSPACE, postProcessor)
+		}
 	}
 
 	return nil
@@ -207,6 +255,14 @@ func (c *config) pluginClient(path string) *plugin.Client {
 		}
 	}
 
+	// Check for special case using `packer plugin PLUGIN`
+	args := []string{}
+	if strings.Contains(path, PACKERSPACE) {
+		parts := strings.Split(path, PACKERSPACE)
+		path = parts[0]
+		args = parts[1:]
+	}
+
 	// If everything failed, just use the original path and let the error
 	// bubble through.
 	if path == "" {
@@ -215,7 +271,7 @@ func (c *config) pluginClient(path string) *plugin.Client {
 
 	log.Printf("Creating plugin client for path: %s", path)
 	var config plugin.ClientConfig
-	config.Cmd = exec.Command(path)
+	config.Cmd = exec.Command(path, args...)
 	config.Managed = true
 	config.MinPort = c.PluginMinPort
 	config.MaxPort = c.PluginMaxPort

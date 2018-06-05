@@ -60,7 +60,7 @@ func TestPush(t *testing.T) {
 	}
 
 	expectedBuilds := map[string]*uploadBuildInfo{
-		"dummy": &uploadBuildInfo{
+		"dummy": {
 			Type: "dummy",
 		},
 	}
@@ -91,11 +91,11 @@ func TestPush_builds(t *testing.T) {
 	}
 
 	expectedBuilds := map[string]*uploadBuildInfo{
-		"dummy": &uploadBuildInfo{
+		"dummy": {
 			Type:     "dummy",
 			Artifact: true,
 		},
-		"foo": &uploadBuildInfo{
+		"foo": {
 			Type: "dummy",
 		},
 	}
@@ -117,6 +117,40 @@ func TestPush_noName(t *testing.T) {
 	args := []string{filepath.Join(testFixture("push-no-name"), "template.json")}
 	if code := c.Run(args); code != 1 {
 		fatalCommand(t, c.Meta)
+	}
+}
+
+func TestPush_cliName(t *testing.T) {
+	var actual []string
+	uploadFn := func(r io.Reader, opts *uploadOpts) (<-chan struct{}, <-chan error, error) {
+		actual = testArchive(t, r)
+
+		doneCh := make(chan struct{})
+		close(doneCh)
+		return doneCh, nil, nil
+	}
+
+	c := &PushCommand{
+		Meta:     testMeta(t),
+		uploadFn: uploadFn,
+	}
+
+	args := []string{
+		"-name=foo/bar",
+		filepath.Join(testFixture("push-no-name"), "template.json"),
+	}
+
+	if code := c.Run(args); code != 0 {
+		fatalCommand(t, c.Meta)
+	}
+
+	expected := []string{
+		archiveTemplateEntry,
+		"template.json",
+	}
+
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("bad: %#v", actual)
 	}
 }
 
@@ -151,6 +185,56 @@ func TestPush_uploadErrorCh(t *testing.T) {
 	args := []string{filepath.Join(testFixture("push"), "template.json")}
 	if code := c.Run(args); code != 1 {
 		fatalCommand(t, c.Meta)
+	}
+}
+
+func TestPush_vars(t *testing.T) {
+	var actualOpts *uploadOpts
+	uploadFn := func(r io.Reader, opts *uploadOpts) (<-chan struct{}, <-chan error, error) {
+		actualOpts = opts
+
+		doneCh := make(chan struct{})
+		close(doneCh)
+		return doneCh, nil, nil
+	}
+
+	c := &PushCommand{
+		Meta:     testMeta(t),
+		uploadFn: uploadFn,
+	}
+
+	args := []string{
+		"-var", "name=foo/bar",
+		"-var", "one=two",
+		"-var-file", filepath.Join(testFixture("push-vars"), "vars.json"),
+		"-var", "overridden=yes",
+		"-sensitive", "super,secret",
+		filepath.Join(testFixture("push-vars"), "template.json"),
+	}
+	if code := c.Run(args); code != 0 {
+		fatalCommand(t, c.Meta)
+	}
+
+	if actualOpts.Slug != "foo/bar" {
+		t.Fatalf("bad slug: %s", actualOpts.Slug)
+	}
+
+	expected := map[string]string{
+		"bar":        "baz",
+		"name":       "foo/bar",
+		"null":       "",
+		"one":        "two",
+		"overridden": "yes",
+		"super":      "this should be secret",
+		"secret":     "this one too",
+	}
+	if !reflect.DeepEqual(actualOpts.Vars, expected) {
+		t.Fatalf("bad vars: got %#v\n expected %#v\n", actualOpts.Vars, expected)
+	}
+
+	expected_sensitive := []string{"super", "secret"}
+	if !reflect.DeepEqual(actualOpts.SensitiveVars, expected_sensitive) {
+		t.Fatalf("bad vars: got %#v\n expected %#v\n", actualOpts.SensitiveVars, expected_sensitive)
 	}
 }
 

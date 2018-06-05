@@ -1,10 +1,13 @@
 package iso
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
-	"github.com/mitchellh/packer/packer"
+
+	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,8 +17,8 @@ import (
 // hard drive for the virtual machine.
 type stepCreateDisk struct{}
 
-func (s *stepCreateDisk) Run(state multistep.StateBag) multistep.StepAction {
-	config := state.Get("config").(*config)
+func (s *stepCreateDisk) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(vboxcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
@@ -55,7 +58,7 @@ func (s *stepCreateDisk) Run(state multistep.StateBag) multistep.StepAction {
 	// the IDE controller above because some other things (disks) require
 	// that.
 	if config.HardDriveInterface == "sata" || config.ISOInterface == "sata" {
-		if err := driver.CreateSATAController(vmName, "SATA Controller"); err != nil {
+		if err := driver.CreateSATAController(vmName, "SATA Controller", config.SATAPortCount); err != nil {
 			err := fmt.Errorf("Error creating disk controller: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
@@ -82,6 +85,16 @@ func (s *stepCreateDisk) Run(state multistep.StateBag) multistep.StepAction {
 		controllerName = "SCSI Controller"
 	}
 
+	nonrotational := "off"
+	if config.HardDriveNonrotational {
+		nonrotational = "on"
+	}
+
+	discard := "off"
+	if config.HardDriveDiscard {
+		discard = "on"
+	}
+
 	command = []string{
 		"storageattach", vmName,
 		"--storagectl", controllerName,
@@ -89,6 +102,8 @@ func (s *stepCreateDisk) Run(state multistep.StateBag) multistep.StepAction {
 		"--device", "0",
 		"--type", "hdd",
 		"--medium", path,
+		"--nonrotational", nonrotational,
+		"--discard", discard,
 	}
 	if err := driver.VBoxManage(command...); err != nil {
 		err := fmt.Errorf("Error attaching hard drive: %s", err)

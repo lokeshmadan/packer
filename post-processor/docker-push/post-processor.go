@@ -2,24 +2,27 @@ package dockerpush
 
 import (
 	"fmt"
-	"github.com/mitchellh/packer/builder/docker"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/post-processor/docker-import"
-	"github.com/mitchellh/packer/post-processor/docker-tag"
-	"strings"
+
+	"github.com/hashicorp/packer/builder/docker"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/post-processor/docker-import"
+	"github.com/hashicorp/packer/post-processor/docker-tag"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
 
-	Login         bool
-	LoginEmail    string `mapstructure:"login_email"`
-	LoginUsername string `mapstructure:"login_username"`
-	LoginPassword string `mapstructure:"login_password"`
-	LoginServer   string `mapstructure:"login_server"`
+	Login                  bool
+	LoginUsername          string `mapstructure:"login_username"`
+	LoginPassword          string `mapstructure:"login_password"`
+	LoginServer            string `mapstructure:"login_server"`
+	EcrLogin               bool   `mapstructure:"ecr_login"`
+	docker.AwsAccessConfig `mapstructure:",squash"`
 
-	tpl *packer.ConfigTemplate
+	ctx interpolate.Context
 }
 
 type PostProcessor struct {
@@ -29,41 +32,20 @@ type PostProcessor struct {
 }
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
-	_, err := common.DecodeConfig(&p.config, raws...)
+	err := config.Decode(&p.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &p.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{},
+		},
+	}, raws...)
 	if err != nil {
 		return err
 	}
 
-	p.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return err
+	if p.config.EcrLogin && p.config.LoginServer == "" {
+		return fmt.Errorf("ECR login requires login server to be provided.")
 	}
-	p.config.tpl.UserVars = p.config.PackerUserVars
-
-	// Accumulate any errors
-	errs := new(packer.MultiError)
-
-	// Process templates
-	templates := map[string]*string{
-		"login_email":    &p.config.LoginEmail,
-		"login_username": &p.config.LoginUsername,
-		"login_password": &p.config.LoginPassword,
-		"login_server":   &p.config.LoginServer,
-	}
-
-	for n, ptr := range templates {
-		var err error
-		*ptr, err = p.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", n, err))
-		}
-	}
-
-	if len(errs.Errors) > 0 {
-		return errs
-	}
-
 	return nil
 }
 
@@ -79,14 +61,25 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	driver := p.Driver
 	if driver == nil {
 		// If no driver is set, then we use the real driver
-		driver = &docker.DockerDriver{Tpl: p.config.tpl, Ui: ui}
+		driver = &docker.DockerDriver{Ctx: &p.config.ctx, Ui: ui}
 	}
 
-	if p.config.Login {
+	if p.config.EcrLogin {
+		ui.Message("Fetching ECR credentials...")
+
+		username, password, err := p.config.EcrGetLogin(p.config.LoginServer)
+		if err != nil {
+			return nil, false, err
+		}
+
+		p.config.LoginUsername = username
+		p.config.LoginPassword = password
+	}
+
+	if p.config.Login || p.config.EcrLogin {
 		ui.Message("Logging in...")
 		err := driver.Login(
 			p.config.LoginServer,
-			p.config.LoginEmail,
 			p.config.LoginUsername,
 			p.config.LoginPassword)
 		if err != nil {
@@ -102,17 +95,8 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		}()
 	}
 
-	// Get the name. We strip off any tags from the name because the
-	// push doesn't use those.
+	// Get the name.
 	name := artifact.Id()
-
-	if i := strings.Index(name, "/"); i >= 0 {
-		// This should always be true because the / is required. But we have
-		// to get the index to this so we don't accidentally strip off the port
-		if j := strings.Index(name[i:], ":"); j >= 0 {
-			name = name[:i+j]
-		}
-	}
 
 	ui.Message("Pushing: " + name)
 	if err := driver.Push(name); err != nil {

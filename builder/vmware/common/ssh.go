@@ -3,54 +3,23 @@ package common
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
 
-	gossh "code.google.com/p/go.crypto/ssh"
-	"github.com/mitchellh/multistep"
-	commonssh "github.com/mitchellh/packer/common/ssh"
-	"github.com/mitchellh/packer/communicator/ssh"
+	commonssh "github.com/hashicorp/packer/common/ssh"
+	"github.com/hashicorp/packer/communicator/ssh"
+	"github.com/hashicorp/packer/helper/multistep"
+	gossh "golang.org/x/crypto/ssh"
 )
 
-func SSHAddressFunc(config *SSHConfig) func(multistep.StateBag) (string, error) {
+func CommHost(config *SSHConfig) func(multistep.StateBag) (string, error) {
 	return func(state multistep.StateBag) (string, error) {
 		driver := state.Get("driver").(Driver)
-		vmxPath := state.Get("vmx_path").(string)
 
-		if config.SSHHost != "" {
-			return fmt.Sprintf("%s:%d", config.SSHHost, config.SSHPort), nil
+		if config.Comm.SSHHost != "" {
+			return config.Comm.SSHHost, nil
 		}
 
-		log.Println("Lookup up IP information...")
-		f, err := os.Open(vmxPath)
-		if err != nil {
-			return "", err
-		}
-		defer f.Close()
-
-		vmxBytes, err := ioutil.ReadAll(f)
-		if err != nil {
-			return "", err
-		}
-
-		vmxData := ParseVMX(string(vmxBytes))
-
-		var ok bool
-		macAddress := ""
-		if macAddress, ok = vmxData["ethernet0.address"]; !ok || macAddress == "" {
-			if macAddress, ok = vmxData["ethernet0.generatedaddress"]; !ok || macAddress == "" {
-				return "", errors.New("couldn't find MAC address in VMX")
-			}
-		}
-
-		ipLookup := &DHCPLeaseGuestLookup{
-			Driver:     driver,
-			Device:     "vmnet8",
-			MACAddress: macAddress,
-		}
-
-		ipAddress, err := ipLookup.GuestIP()
+		ipAddress, err := driver.GuestIP(state)
 		if err != nil {
 			log.Printf("IP lookup failed: %s", err)
 			return "", fmt.Errorf("IP lookup failed: %s", err)
@@ -62,20 +31,20 @@ func SSHAddressFunc(config *SSHConfig) func(multistep.StateBag) (string, error) 
 		}
 
 		log.Printf("Detected IP: %s", ipAddress)
-		return fmt.Sprintf("%s:%d", ipAddress, config.SSHPort), nil
+		return ipAddress, nil
 	}
 }
 
 func SSHConfigFunc(config *SSHConfig) func(multistep.StateBag) (*gossh.ClientConfig, error) {
 	return func(state multistep.StateBag) (*gossh.ClientConfig, error) {
 		auth := []gossh.AuthMethod{
-			gossh.Password(config.SSHPassword),
+			gossh.Password(config.Comm.SSHPassword),
 			gossh.KeyboardInteractive(
-				ssh.PasswordKeyboardInteractive(config.SSHPassword)),
+				ssh.PasswordKeyboardInteractive(config.Comm.SSHPassword)),
 		}
 
-		if config.SSHKeyPath != "" {
-			signer, err := commonssh.FileSigner(config.SSHKeyPath)
+		if config.Comm.SSHPrivateKey != "" {
+			signer, err := commonssh.FileSigner(config.Comm.SSHPrivateKey)
 			if err != nil {
 				return nil, err
 			}
@@ -84,8 +53,9 @@ func SSHConfigFunc(config *SSHConfig) func(multistep.StateBag) (*gossh.ClientCon
 		}
 
 		return &gossh.ClientConfig{
-			User: config.SSHUser,
-			Auth: auth,
+			User:            config.Comm.SSHUsername,
+			Auth:            auth,
+			HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 		}, nil
 	}
 }

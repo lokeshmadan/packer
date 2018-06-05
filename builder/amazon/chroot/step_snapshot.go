@@ -1,14 +1,15 @@
 package chroot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/mitchellh/goamz/ec2"
-	"github.com/mitchellh/multistep"
-	awscommon "github.com/mitchellh/packer/builder/amazon/common"
-	"github.com/mitchellh/packer/packer"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	awscommon "github.com/hashicorp/packer/builder/amazon/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // StepSnapshot creates a snapshot of the created volume.
@@ -19,15 +20,18 @@ type StepSnapshot struct {
 	snapshotId string
 }
 
-func (s *StepSnapshot) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepSnapshot) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	ui := state.Get("ui").(packer.Ui)
 	volumeId := state.Get("volume_id").(string)
 
 	ui.Say("Creating snapshot...")
-	createSnapResp, err := ec2conn.CreateSnapshot(
-		volumeId,
-		fmt.Sprintf("Packer: %s", time.Now().String()))
+	description := fmt.Sprintf("Packer: %s", time.Now().String())
+
+	createSnapResp, err := ec2conn.CreateSnapshot(&ec2.CreateSnapshotInput{
+		VolumeId:    &volumeId,
+		Description: &description,
+	})
 	if err != nil {
 		err := fmt.Errorf("Error creating snapshot: %s", err)
 		state.Put("error", err)
@@ -36,7 +40,7 @@ func (s *StepSnapshot) Run(state multistep.StateBag) multistep.StepAction {
 	}
 
 	// Set the snapshot ID so we can delete it later
-	s.snapshotId = createSnapResp.Id
+	s.snapshotId = *createSnapResp.SnapshotId
 	ui.Message(fmt.Sprintf("Snapshot ID: %s", s.snapshotId))
 
 	// Wait for the snapshot to be ready
@@ -45,7 +49,7 @@ func (s *StepSnapshot) Run(state multistep.StateBag) multistep.StepAction {
 		StepState: state,
 		Target:    "completed",
 		Refresh: func() (interface{}, string, error) {
-			resp, err := ec2conn.Snapshots([]string{s.snapshotId}, ec2.NewFilter())
+			resp, err := ec2conn.DescribeSnapshots(&ec2.DescribeSnapshotsInput{SnapshotIds: []*string{&s.snapshotId}})
 			if err != nil {
 				return nil, "", err
 			}
@@ -55,7 +59,7 @@ func (s *StepSnapshot) Run(state multistep.StateBag) multistep.StepAction {
 			}
 
 			s := resp.Snapshots[0]
-			return s, s.Status, nil
+			return s, *s.State, nil
 		},
 	}
 
@@ -68,6 +72,12 @@ func (s *StepSnapshot) Run(state multistep.StateBag) multistep.StepAction {
 	}
 
 	state.Put("snapshot_id", s.snapshotId)
+
+	snapshots := map[string][]string{
+		*ec2conn.Config.Region: {s.snapshotId},
+	}
+	state.Put("snapshots", snapshots)
+
 	return multistep.ActionContinue
 }
 
@@ -83,7 +93,7 @@ func (s *StepSnapshot) Cleanup(state multistep.StateBag) {
 		ec2conn := state.Get("ec2").(*ec2.EC2)
 		ui := state.Get("ui").(packer.Ui)
 		ui.Say("Removing snapshot since we cancelled or halted...")
-		_, err := ec2conn.DeleteSnapshots([]string{s.snapshotId})
+		_, err := ec2conn.DeleteSnapshot(&ec2.DeleteSnapshotInput{SnapshotId: &s.snapshotId})
 		if err != nil {
 			ui.Error(fmt.Sprintf("Error: %s", err))
 		}

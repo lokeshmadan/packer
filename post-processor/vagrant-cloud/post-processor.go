@@ -6,11 +6,15 @@ package vagrantcloud
 
 import (
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/packer"
 	"log"
+	"os"
 	"strings"
+
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const VAGRANT_CLOUD_URL = "https://vagrantcloud.com/api/v1"
@@ -28,7 +32,7 @@ type Config struct {
 
 	BoxDownloadUrl string `mapstructure:"box_download_url"`
 
-	tpl *packer.ConfigTemplate
+	ctx interpolate.Context
 }
 
 type boxDownloadUrlTemplate struct {
@@ -37,26 +41,40 @@ type boxDownloadUrlTemplate struct {
 }
 
 type PostProcessor struct {
-	config Config
-	client *VagrantCloudClient
-	runner multistep.Runner
+	config         Config
+	client         *VagrantCloudClient
+	runner         multistep.Runner
+	warnAtlasToken bool
 }
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
-	_, err := common.DecodeConfig(&p.config, raws...)
+	err := config.Decode(&p.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &p.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"box_download_url",
+			},
+		},
+	}, raws...)
 	if err != nil {
 		return err
 	}
-
-	p.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return err
-	}
-	p.config.tpl.UserVars = p.config.PackerUserVars
 
 	// Default configuration
 	if p.config.VagrantCloudUrl == "" {
 		p.config.VagrantCloudUrl = VAGRANT_CLOUD_URL
+	}
+
+	if p.config.AccessToken == "" {
+		envToken := os.Getenv("VAGRANT_CLOUD_TOKEN")
+		if envToken == "" {
+			envToken = os.Getenv("ATLAS_TOKEN")
+			if envToken != "" {
+				p.warnAtlasToken = true
+			}
+		}
+		p.config.AccessToken = envToken
 	}
 
 	// Accumulate any errors
@@ -73,15 +91,6 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		if *ptr == "" {
 			errs = packer.MultiErrorAppend(
 				errs, fmt.Errorf("%s must be set", key))
-		}
-	}
-
-	// Template process
-	for key, ptr := range templates {
-		*ptr, err = p.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", key, err))
 		}
 	}
 
@@ -105,16 +114,21 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 			"Unknown files in artifact from vagrant post-processor: %s", artifact.Files())
 	}
 
+	if p.warnAtlasToken {
+		ui.Message("Warning: Using Vagrant Cloud token found in ATLAS_TOKEN. Please make sure it is correct, or set VAGRANT_CLOUD_TOKEN")
+	}
+
 	// create the HTTP client
 	p.client = VagrantCloudClient{}.New(p.config.VagrantCloudUrl, p.config.AccessToken)
 
 	// The name of the provider for vagrant cloud, and vagrant
 	providerName := providerFromBuilderName(artifact.Id())
 
-	boxDownloadUrl, err := p.config.tpl.Process(p.config.BoxDownloadUrl, &boxDownloadUrlTemplate{
+	p.config.ctx.Data = &boxDownloadUrlTemplate{
 		ArtifactId: artifact.Id(),
 		Provider:   providerName,
-	})
+	}
+	boxDownloadUrl, err := interpolate.Render(p.config.BoxDownloadUrl, &p.config.ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("Error processing box_download_url: %s", err)
 	}
@@ -138,7 +152,6 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 			new(stepCreateProvider),
 			new(stepPrepareUpload),
 			new(stepUpload),
-			new(stepVerifyUpload),
 			new(stepReleaseVersion),
 		}
 	} else {
@@ -151,15 +164,7 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	}
 
 	// Run the steps
-	if p.config.PackerDebug {
-		p.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		p.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	p.runner = common.NewRunner(steps, p.config.PackerConfig, ui)
 	p.runner.Run(state)
 
 	// If there was an error, return that
@@ -184,6 +189,8 @@ func providerFromBuilderName(name string) string {
 	switch name {
 	case "aws":
 		return "aws"
+	case "scaleway":
+		return "scaleway"
 	case "digitalocean":
 		return "digitalocean"
 	case "virtualbox":

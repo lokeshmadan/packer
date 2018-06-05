@@ -1,9 +1,13 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"log"
+
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step removes any devices (floppy disks, ISOs, etc.) from the
@@ -17,7 +21,7 @@ import (
 // Produces:
 type StepRemoveDevices struct{}
 
-func (s *StepRemoveDevices) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepRemoveDevices) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
@@ -34,6 +38,30 @@ func (s *StepRemoveDevices) Run(state multistep.StateBag) multistep.StepAction {
 		}
 		if err := driver.VBoxManage(command...); err != nil {
 			err := fmt.Errorf("Error removing floppy: %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+
+		var vboxErr error
+		// Retry for 10 minutes to remove the floppy controller.
+		log.Printf("Trying for 10 minutes to remove floppy controller.")
+		err := common.Retry(15, 15, 40, func(_ uint) (bool, error) {
+			// Don't forget to remove the floppy controller as well
+			command = []string{
+				"storagectl", vmName,
+				"--name", "Floppy Controller",
+				"--remove",
+			}
+			vboxErr = driver.VBoxManage(command...)
+			if vboxErr != nil {
+				log.Printf("Error removing floppy controller. Retrying.")
+				return false, nil
+			}
+			return true, nil
+		})
+		if err == common.RetryExhaustedError {
+			err := fmt.Errorf("Error removing floppy controller: %s", vboxErr)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
@@ -60,6 +88,23 @@ func (s *StepRemoveDevices) Run(state multistep.StateBag) multistep.StepAction {
 
 		if err := driver.VBoxManage(command...); err != nil {
 			err := fmt.Errorf("Error detaching ISO: %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
+
+	if _, ok := state.GetOk("guest_additions_attached"); ok {
+		ui.Message("Removing guest additions drive...")
+		command := []string{
+			"storageattach", vmName,
+			"--storagectl", "IDE Controller",
+			"--port", "1",
+			"--device", "0",
+			"--medium", "none",
+		}
+		if err := driver.VBoxManage(command...); err != nil {
+			err := fmt.Errorf("Error removing guest additions: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt

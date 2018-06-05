@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"github.com/mitchellh/packer/packer"
-	packrpc "github.com/mitchellh/packer/packer/rpc"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,6 +15,9 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/hashicorp/packer/packer"
+	packrpc "github.com/hashicorp/packer/packer/rpc"
 )
 
 // If this is true, then the "unexpected EOF" panic will not be
@@ -291,7 +292,7 @@ func (c *Client) Start() (addr net.Addr, err error) {
 	// so they dont' block since it is an io.Pipe
 	defer func() {
 		go func() {
-			for _ = range linesCh {
+			for range linesCh {
 			}
 		}()
 	}()

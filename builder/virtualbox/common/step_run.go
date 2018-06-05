@@ -1,10 +1,11 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
-	"time"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step starts the virtual machine.
@@ -16,23 +17,35 @@ import (
 //
 // Produces:
 type StepRun struct {
-	BootWait time.Duration
 	Headless bool
 
 	vmName string
 }
 
-func (s *StepRun) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepRun) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
 
 	ui.Say("Starting the virtual machine...")
 	guiArgument := "gui"
-	if s.Headless == true {
-		ui.Message("WARNING: The VM will be started in headless mode, as configured.\n" +
-			"In headless mode, errors during the boot sequence or OS setup\n" +
-			"won't be easily visible. Use at your own discretion.")
+	if s.Headless {
+		vrdpIpRaw, vrdpIpOk := state.GetOk("vrdpIp")
+		vrdpPortRaw, vrdpPortOk := state.GetOk("vrdpPort")
+
+		if vrdpIpOk && vrdpPortOk {
+			vrdpIp := vrdpIpRaw.(string)
+			vrdpPort := vrdpPortRaw.(uint)
+
+			ui.Message(fmt.Sprintf(
+				"The VM will be run headless, without a GUI. If you want to\n"+
+					"view the screen of the VM, connect via VRDP without a password to\n"+
+					"rdp://%s:%d", vrdpIp, vrdpPort))
+		} else {
+			ui.Message("The VM will be run headless, without a GUI, as configured.\n" +
+				"If the run isn't succeeding as you expect, please enable the GUI\n" +
+				"to inspect the progress of the build.")
+		}
 		guiArgument = "headless"
 	}
 	command := []string{"startvm", vmName, "--type", guiArgument}
@@ -44,22 +57,6 @@ func (s *StepRun) Run(state multistep.StateBag) multistep.StepAction {
 	}
 
 	s.vmName = vmName
-
-	if int64(s.BootWait) > 0 {
-		ui.Say(fmt.Sprintf("Waiting %s for boot...", s.BootWait))
-		wait := time.After(s.BootWait)
-	WAITLOOP:
-		for {
-			select {
-			case <-wait:
-				break WAITLOOP
-			case <-time.After(1 * time.Second):
-				if _, ok := state.GetOk(multistep.StateCancelled); ok {
-					return multistep.ActionHalt
-				}
-			}
-		}
-	}
 
 	return multistep.ActionContinue
 }
